@@ -1,0 +1,26 @@
+[project]
+name = "y3ndidi-backend"
+version = "0.1.0"
+description = "FastAPI backend for the Y3ndidi school food ordering platform"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+  "fastapi",
+  "uvicorn[standard]",
+  "sqlmodel",
+  "alembic",
+  "asyncpg",
+  "python-jose[cryptography]",
+  "passlib[argon2]",
+  "python-dotenv",
+  "httpx",
+  "pydantic",
+]
+
+[tool.setuptools.packages.find]
+where = ["app"]
+
+[tool.pytest.ini_options]
+minversion = "7.0"
+addopts = "-q --disable-warnings --strict-markers"
+python_files = ["test_*.py"]

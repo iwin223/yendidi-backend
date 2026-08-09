@@ -1,0 +1,29 @@
+from fastapi import APIRouter, FastAPI
+from sqlmodel import SQLModel
+from middleware import register_middleware
+from app.api import auth, catalog, orders, wallet, webhooks, parents, schools, reports, notifications, subscriptions
+from app.db.session import engine
+
+app = FastAPI(title="Y3ndidi Backend", version="0.1.0")  
+
+register_middleware(app)
+router = APIRouter(prefix="/v1")
+
+router.include_router(auth.router, prefix="/auth", tags=["auth"])
+router.include_router(catalog.router, prefix="", tags=["catalog"])
+router.include_router(orders.router, prefix="", tags=["orders"])
+router.include_router(wallet.router, prefix="", tags=["wallet"])
+router.include_router(parents.router, prefix="", tags=["parents"])
+router.include_router(schools.router, prefix="", tags=["schools"])
+router.include_router(reports.router, prefix="", tags=["reports"])
+router.include_router(notifications.router, prefix="", tags=["notifications"])
+router.include_router(subscriptions.router, prefix="", tags=["subscriptions"])
+router.include_router(webhooks.router, prefix="/webhooks", tags=["webhooks"])
+
+app.include_router(router)
+
+
+@app.on_event("startup")
+async def on_startup() -> None:
+    async with engine.begin() as conn:
+        await conn.run_sync(SQLModel.metadata.create_all)

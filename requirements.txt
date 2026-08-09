@@ -1,0 +1,14 @@
+fastapi
+uvicorn[standard]
+sqlmodel
+alembic
+asyncpg
+python-jose[cryptography]
+passlib[argon2]
+python-dotenv
+httpx
+pydantic
+pyotp
+pytest 
+pydantic-settings 
+python-multipart
