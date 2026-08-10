@@ -1,10 +1,13 @@
-from pydantic import Field, ConfigDict
-from typing import Optional
-from pydantic_settings import BaseSettings
+import json
+from pathlib import Path
+from typing import Annotated, Optional
+
+from pydantic import ConfigDict, field_validator
+from pydantic_settings import BaseSettings, NoDecode
 
 
 class Settings(BaseSettings):
-    ALLOWED_HOSTS: list[str]
+    ALLOWED_HOSTS: Annotated[list[str], NoDecode]
     database_url: str
     jwt_secret: str
     jwt_algorithm: str
@@ -15,7 +18,21 @@ class Settings(BaseSettings):
     elasticemail_api_key: str
     elasticemail_sender: str
 
-    model_config = ConfigDict(env_file=".env", env_file_encoding="utf-8", case_sensitive=False)
+    model_config = ConfigDict(
+        env_file=Path(__file__).resolve().parents[2] / ".env",
+        env_file_encoding="utf-8",
+        case_sensitive=False,
+    )
+
+    @field_validator("ALLOWED_HOSTS", mode="before")
+    @classmethod
+    def parse_allowed_hosts(cls, value: object) -> object:
+        if not isinstance(value, str):
+            return value
+        value = value.strip()
+        if value.startswith("["):
+            return json.loads(value)
+        return [host.strip() for host in value.split(",") if host.strip()]
 
 
 settings = Settings()

@@ -1,5 +1,6 @@
 from datetime import datetime, timedelta
 from typing import Optional
+from uuid import UUID
 import secrets
 import uuid
 
@@ -72,12 +73,12 @@ class AccessTokenResponse(BaseModel):
 
 
 class UserResponse(BaseModel):
-    id: str
+    id: UUID
     role: str
     full_name: str
     email: Optional[str]
     phone: Optional[str]
-    school_id: Optional[str]
+    school_id: Optional[UUID]
 
     class Config:
         from_attributes = True

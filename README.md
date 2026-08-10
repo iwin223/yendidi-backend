@@ -42,6 +42,18 @@ Run migrations with:
 alembic upgrade head
 ```
 
+## Seed development data
+
+After running migrations, create a representative local dataset with:
+
+```bash
+python -m app.seed
+```
+
+The command is safe to rerun. It creates demo users with the password `Password123!`:
+`admin@y3ndidi.example`, `parent@y3ndidi.example`, `vendor@y3ndidi.example`, and
+`student@y3ndidi.example`.
+
 ## Notes
 
 This implementation uses Paystack for all payment methods, including mobile money and bank transfer.
