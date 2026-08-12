@@ -61,7 +61,7 @@ class MenuItemResponse(BaseModel):
 
 class MenuItemCreateRequest(BaseModel):
     name: str
-    description: Optional[str]
+    description: Optional[str] = None
     category: FoodCategory
     tags: Optional[List[FoodCategory]] = []
     price_minor: int
@@ -70,21 +70,26 @@ class MenuItemCreateRequest(BaseModel):
     available: bool = True
     stock_count: int = 0
     prep_minutes: int = 10
-    kcal: Optional[int]
+    kcal: Optional[int] = None
 
 
 class MenuItemUpdateRequest(BaseModel):
-    name: Optional[str]
-    description: Optional[str]
-    category: Optional[FoodCategory]
-    tags: Optional[List[FoodCategory]]
-    price_minor: Optional[int]
-    art_key: Optional[str]
-    ingredients: Optional[List[str]]
-    available: Optional[bool]
-    stock_count: Optional[int]
-    prep_minutes: Optional[int]
-    kcal: Optional[int]
+    # Every field is genuinely optional here — this backs a PATCH that relies
+    # on `.dict(exclude_unset=True)` for partial updates. Without `= None`,
+    # Pydantic v2 still treats `Optional[X]` as required (just nullable), so a
+    # caller omitting any field — the entire point of a partial update — got a
+    # 422 "field required" instead.
+    name: Optional[str] = None
+    description: Optional[str] = None
+    category: Optional[FoodCategory] = None
+    tags: Optional[List[FoodCategory]] = None
+    price_minor: Optional[int] = None
+    art_key: Optional[str] = None
+    ingredients: Optional[List[str]] = None
+    available: Optional[bool] = None
+    stock_count: Optional[int] = None
+    prep_minutes: Optional[int] = None
+    kcal: Optional[int] = None
 
 
 class VendorAcceptingUpdate(BaseModel):
@@ -341,6 +346,7 @@ async def create_menu_item(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Vendor not found")
 
     item = MenuItem(
+        id=uuid4(),
         vendor_id=vendor_id,
         name=request.name,
         description=request.description,

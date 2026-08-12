@@ -1,6 +1,7 @@
 import hashlib
 import hmac
 from datetime import datetime
+from uuid import uuid4
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Request, status
 from sqlmodel import select
@@ -17,6 +18,7 @@ router = APIRouter()
 async def elastic_email_webhook(request: Request, session: AsyncSession = Depends(get_session)):
     payload = await request.json()
     event = WebhookEvent(
+        id=uuid4(),
         provider="elastic-email",
         event_type=payload.get("event", "unknown"),
         payload=payload,
@@ -35,6 +37,7 @@ def verify_paystack_signature(payload: bytes, signature: str) -> bool:
 async def hubtel_webhook(request: Request, session: AsyncSession = Depends(get_session)):
     payload = await request.json()
     event = WebhookEvent(
+        id=uuid4(),
         provider="hubtel",
         event_type=payload.get("EventType", payload.get("ResponseCode", "unknown")),
         payload=payload,
@@ -60,6 +63,7 @@ async def paystack_webhook(request: Request, x_paystack_signature: str = Header(
     status_value = data.get("status")
 
     event_record = WebhookEvent(
+        id=uuid4(),
         provider="paystack",
         event_type=event or "unknown",
         payload=payload,
@@ -91,6 +95,7 @@ async def paystack_webhook(request: Request, x_paystack_signature: str = Header(
         wallet.balance_minor += topup.amount_minor
         session.add(wallet)
         txn = WalletTransaction(
+            id=uuid4(),
             wallet_id=wallet.id,
             student_id=wallet.student_id,
             type="topup",

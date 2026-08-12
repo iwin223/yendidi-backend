@@ -34,9 +34,9 @@ class DeviceRegistrationRequest(BaseModel):
 
 
 class NotificationPreferencesRequest(BaseModel):
-    push_enabled: Optional[bool]
-    email_enabled: Optional[bool]
-    sms_enabled: Optional[bool]
+    push_enabled: Optional[bool] = None
+    email_enabled: Optional[bool] = None
+    sms_enabled: Optional[bool] = None
 
 
 class AnnouncementRequest(BaseModel):
@@ -107,6 +107,7 @@ async def register_device(
         session.add(device)
     else:
         device = DeviceRegistration(
+            id=uuid4(),
             user_id=current_user.id,
             device_token=request.device_token,
             platform=request.platform,

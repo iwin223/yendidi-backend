@@ -1,6 +1,6 @@
 from datetime import datetime
 from typing import List, Optional
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from fastapi import APIRouter, Depends, HTTPException, Header, status
 from pydantic import BaseModel
@@ -88,10 +88,12 @@ class TopupStatusResponse(BaseModel):
 
 
 class WalletControlUpdate(BaseModel):
-    daily_limit_minor: Optional[int]
-    weekly_limit_minor: Optional[int]
-    blocked_categories: Optional[List[str]]
-    low_balance_threshold_minor: Optional[int]
+    # Partial update via `.dict(exclude_unset=True)` — every field must default
+    # to None or Pydantic v2 requires it present on every request regardless.
+    daily_limit_minor: Optional[int] = None
+    weekly_limit_minor: Optional[int] = None
+    blocked_categories: Optional[List[str]] = None
+    low_balance_threshold_minor: Optional[int] = None
 
 
 class WalletFreezeRequest(BaseModel):
@@ -173,6 +175,7 @@ async def create_topup(
         )
 
     topup = Topup(
+        id=uuid4(),
         wallet_id=wallet_id,
         initiated_by=current_user.id,
         amount_minor=request.amount_minor,
@@ -188,6 +191,7 @@ async def create_topup(
 
     transaction = await create_paystack_transaction(
         amount_minor=request.amount_minor,
+        email=current_user.email or f"{current_user.id}@y3ndidi.app",
         payer_reference=request.payer_reference,
         topup_id=str(topup.id),
     )

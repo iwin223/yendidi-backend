@@ -37,7 +37,7 @@ class OrderPreviewRequest(BaseModel):
     vendor_id: str
     items: List[OrderItemRequest]
     pickup_slot: str
-    note: Optional[str]
+    note: Optional[str] = None
 
 
 class OrderPreviewResponse(BaseModel):
@@ -62,8 +62,8 @@ class OrderCreateResponse(BaseModel):
 
 
 class OrderLineResponse(BaseModel):
-    id: str
-    menu_item_id: Optional[str]
+    id: UUID
+    menu_item_id: Optional[UUID]
     name: str
     art_key: str
     unit_price_minor: int
@@ -74,11 +74,11 @@ class OrderLineResponse(BaseModel):
 
 
 class OrderDetailResponse(BaseModel):
-    id: str
+    id: UUID
     code: str
-    student_id: str
-    school_id: str
-    vendor_id: str
+    student_id: UUID
+    school_id: UUID
+    vendor_id: UUID
     subtotal_minor: int
     service_fee_minor: int
     total_minor: int
@@ -94,9 +94,9 @@ class OrderDetailResponse(BaseModel):
 
 
 class OrderSummaryResponse(BaseModel):
-    id: str
+    id: UUID
     code: str
-    vendor_id: str
+    vendor_id: UUID
     total_minor: int
     status: OrderStatus
     placed_at: datetime
@@ -107,7 +107,7 @@ class OrderSummaryResponse(BaseModel):
 
 class OrderTransitionRequest(BaseModel):
     new_status: OrderStatus
-    note: Optional[str]
+    note: Optional[str] = None
 
 
 SERVICE_FEE_PERCENT = 5
@@ -347,52 +347,57 @@ async def place_order(
         placed_at=datetime.utcnow(),
         updated_at=datetime.utcnow(),
     )
-    async with session.begin():
-        session.add(order)
-        await session.flush()
+    # `session` already has a transaction auto-begun from the SELECTs above
+    # (SQLAlchemy async sessions auto-begin on first use), so wrapping this in
+    # `async with session.begin():` raised "A transaction is already begun on
+    # this Session." on every single order placement. Just add everything and
+    # commit once at the end — it's still one atomic transaction either way.
+    session.add(order)
+    await session.flush()
 
-        for item_req in request.items:
-            menu_item = item_map[item_req.menu_item_id]
-            line = OrderLine(
-                id=uuid4(),
-                order_id=order.id,
-                menu_item_id=menu_item.id,
-                name=menu_item.name,
-                art_key=menu_item.art_key,
-                unit_price_minor=menu_item.price_minor,
-                quantity=item_req.quantity,
-            )
-            session.add(line)
-            menu_item.stock_count = max(menu_item.stock_count - item_req.quantity, 0)
-            session.add(menu_item)
-
-        wallet.balance_minor -= total
-        wallet.updated_at = datetime.utcnow()
-        session.add(wallet)
-        transaction = WalletTransaction(
-            id=uuid4(),
-            wallet_id=wallet.id,
-            student_id=student.id,
-            type="purchase",
-            amount_minor=-total,
-            balance_after_minor=wallet.balance_minor,
-            description=f"Purchase order {order.code}",
-            reference=str(order.id),
-            order_id=order.id,
-            actor_id=current_user.id,
-            created_at=datetime.utcnow(),
-        )
-        session.add(transaction)
-        order_event = OrderEvent(
+    for item_req in request.items:
+        menu_item = item_map[item_req.menu_item_id]
+        line = OrderLine(
             id=uuid4(),
             order_id=order.id,
-            status=OrderStatus.pending,
-            actor_id=current_user.id,
-            note="Order placed",
-            created_at=datetime.utcnow(),
+            menu_item_id=menu_item.id,
+            name=menu_item.name,
+            art_key=menu_item.art_key,
+            unit_price_minor=menu_item.price_minor,
+            quantity=item_req.quantity,
         )
-        session.add(order_event)
+        session.add(line)
+        menu_item.stock_count = max(menu_item.stock_count - item_req.quantity, 0)
+        session.add(menu_item)
 
+    wallet.balance_minor -= total
+    wallet.updated_at = datetime.utcnow()
+    session.add(wallet)
+    transaction = WalletTransaction(
+        id=uuid4(),
+        wallet_id=wallet.id,
+        student_id=student.id,
+        type="purchase",
+        amount_minor=-total,
+        balance_after_minor=wallet.balance_minor,
+        description=f"Purchase order {order.code}",
+        reference=str(order.id),
+        order_id=order.id,
+        actor_id=current_user.id,
+        created_at=datetime.utcnow(),
+    )
+    session.add(transaction)
+    order_event = OrderEvent(
+        id=uuid4(),
+        order_id=order.id,
+        status=OrderStatus.pending,
+        actor_id=current_user.id,
+        note="Order placed",
+        created_at=datetime.utcnow(),
+    )
+    session.add(order_event)
+
+    await session.commit()
     await session.refresh(order)
 
     return OrderCreateResponse(

@@ -49,18 +49,20 @@ class StudentCreateRequest(BaseModel):
     class_name: str
     level: str
     allergies: Optional[List[str]] = []
-    dietary_notes: Optional[str]
-    email: Optional[str]
-    phone: Optional[str]
+    dietary_notes: Optional[str] = None
+    email: Optional[str] = None
+    phone: Optional[str] = None
 
 
 class StudentUpdateRequest(BaseModel):
-    first_name: Optional[str]
-    last_name: Optional[str]
-    class_name: Optional[str]
-    level: Optional[str]
-    allergies: Optional[List[str]]
-    dietary_notes: Optional[str]
+    # Partial update — every field must default to None, or Pydantic v2
+    # requires it present on every PATCH regardless of `exclude_unset`.
+    first_name: Optional[str] = None
+    last_name: Optional[str] = None
+    class_name: Optional[str] = None
+    level: Optional[str] = None
+    allergies: Optional[List[str]] = None
+    dietary_notes: Optional[str] = None
 
 
 class SchoolCreateRequest(BaseModel):
@@ -68,10 +70,10 @@ class SchoolCreateRequest(BaseModel):
     code: str
     region: str
     district: str
-    address: Optional[str]
-    phone: Optional[str]
-    email: Optional[str]
-    headteacher: Optional[str]
+    address: Optional[str] = None
+    phone: Optional[str] = None
+    email: Optional[str] = None
+    headteacher: Optional[str] = None
     levels: Optional[List[str]] = []
 
 
@@ -230,6 +232,7 @@ async def create_school_student(
         updated_at=datetime.utcnow(),
     )
     session.add(user)
+    await session.flush()  # `student.user_id` FKs to this row — must exist before the student insert
     student = Student(
         id=uuid4(),
         user_id=user.id,
@@ -262,13 +265,19 @@ async def import_school_students(
     imported = 0
     skipped = 0
     errors: List[str] = []
-    for index, row in enumerate(reader, start=1):
-        student_code = row.get("student_code")
+    for index, raw_row in enumerate(reader, start=1):
+        # The app's own "Use sample data" template ships headers like "First
+        # Name, Last Name, Class, Student ID" — human-readable, no `level`
+        # column at all (the app derives level from the class name). Matching
+        # only exact snake_case headers silently skipped every row of that
+        # format, so normalise headers and accept the common aliases.
+        row = {(k or "").strip().lower().replace(" ", "_"): v for k, v in raw_row.items()}
+        student_code = row.get("student_code") or row.get("student_id")
         first_name = row.get("first_name")
         last_name = row.get("last_name")
-        class_name = row.get("class_name")
-        level = row.get("level")
-        if not all([student_code, first_name, last_name, class_name, level]):
+        class_name = row.get("class_name") or row.get("class")
+        level = row.get("level") or ("jhs" if class_name and "jhs" in class_name.lower() else "primary")
+        if not all([student_code, first_name, last_name, class_name]):
             skipped += 1
             errors.append(f"row {index}: missing required fields")
             continue
@@ -290,6 +299,7 @@ async def import_school_students(
             updated_at=datetime.utcnow(),
         )
         session.add(user)
+        await session.flush()  # `student.user_id` FKs to this row — must exist before the student insert
         student = Student(
             id=uuid4(),
             user_id=user.id,
