@@ -19,7 +19,7 @@ from app.db.models import (
     WalletTransaction,
 )
 from app.db.session import AsyncSession
-from app.payments import create_paystack_transaction
+from app.payments import PaystackError, create_paystack_transaction
 
 router = APIRouter()
 
@@ -189,12 +189,20 @@ async def create_topup(
     await session.commit()
     await session.refresh(topup)
 
-    transaction = await create_paystack_transaction(
-        amount_minor=request.amount_minor,
-        email=current_user.email or f"{current_user.id}@y3ndidi.app",
-        payer_reference=request.payer_reference,
-        topup_id=str(topup.id),
-    )
+    try:
+        transaction = await create_paystack_transaction(
+            amount_minor=request.amount_minor,
+            email=current_user.email or f"{current_user.id}@y3ndidi.app",
+            payer_reference=request.payer_reference,
+            topup_id=str(topup.id),
+        )
+    except PaystackError as exc:
+        topup.status = TopupStatus.failed
+        topup.failure_reason = str(exc)
+        session.add(topup)
+        await session.commit()
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
+
     topup.authorization_url = transaction.get("authorization_url")
     topup.processor_data = transaction
     session.add(topup)
