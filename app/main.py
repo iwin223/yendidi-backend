@@ -27,3 +27,8 @@ app.include_router(router)
 async def on_startup() -> None:
     async with engine.begin() as conn:
         await conn.run_sync(SQLModel.metadata.create_all)
+
+
+@app.on_event("shutdown")
+async def on_shutdown() -> None:
+    await engine.dispose()

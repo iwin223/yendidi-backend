@@ -23,9 +23,11 @@ from app.core.security import (
 from app.db.models import (
     OneTimePassword,
     OTPPurpose,
+    Parent,
     RefreshToken,
     Student,
     User,
+    Vendor,
 )
 from app.db.session import AsyncSession
 
@@ -79,6 +81,7 @@ class UserResponse(BaseModel):
     email: Optional[str]
     phone: Optional[str]
     school_id: Optional[UUID]
+    profile_id: Optional[UUID] = None
 
     class Config:
         from_attributes = True
@@ -101,6 +104,16 @@ async def _get_profile_id(user: User, session: AsyncSession) -> Optional[str]:
         student_result = await session.execute(student_stmt)
         student = student_result.scalar_one_or_none()
         return str(student.id) if student else None
+    if user.role == "parent":
+        parent_stmt = select(Parent).where(Parent.user_id == user.id)
+        parent_result = await session.execute(parent_stmt)
+        parent = parent_result.scalar_one_or_none()
+        return str(parent.id) if parent else None
+    if user.role == "vendor":
+        vendor_stmt = select(Vendor).where(Vendor.user_id == user.id)
+        vendor_result = await session.execute(vendor_stmt)
+        vendor = vendor_result.scalar_one_or_none()
+        return str(vendor.id) if vendor else None
     return None
 
 
@@ -295,5 +308,11 @@ async def verify_mfa(
 
 
 @router.get("/me", response_model=UserResponse)
-async def me(current_user: User = Depends(get_current_user)):
-    return UserResponse.from_orm(current_user)
+async def me(
+    current_user: User = Depends(get_current_user),
+    session: AsyncSession = Depends(get_session),
+):
+    profile_id = await _get_profile_id(current_user, session)
+    response = UserResponse.from_orm(current_user)
+    response.profile_id = UUID(profile_id) if profile_id else None
+    return response

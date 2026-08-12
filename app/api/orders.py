@@ -204,7 +204,11 @@ async def orders_preview(request: OrderPreviewRequest, session: AsyncSession = D
 
     if len(menu_items) != len(menu_item_ids):
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="One or more menu items are invalid")
-    if any(item.vendor_id != request.vendor_id for item in menu_items):
+    # `request.vendor_id` is a raw str while `item.vendor_id` is a UUID once loaded from
+    # the DB — comparing them directly is always unequal, so every preview was rejected
+    # regardless of whether the item actually belonged to the vendor. Compare against the
+    # already-fetched `vendor.id` (a real UUID) instead, matching place_order()'s check.
+    if any(item.vendor_id != vendor.id for item in menu_items):
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="One or more menu items are not sold by the selected vendor")
 
     quantities = [item.quantity for item in request.items]
