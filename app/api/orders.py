@@ -491,7 +491,7 @@ async def get_vendor_orders(vendor_id: str, current_user: User = Depends(get_cur
     return orders_result.scalars().all()
 
 
-@router.post("/orders/{order_id}/transition")
+@router.post("/orders/{order_id}/transition", response_model=OrderDetailResponse)
 async def transition_order(
     order_id: str,
     request: OrderTransitionRequest,
@@ -575,4 +575,27 @@ async def transition_order(
     session.add(order_event)
     await session.commit()
 
-    return {"status": "ok", "new_status": order.status}
+    # `client.ts`'s orders.transition() maps this response the same way as
+    # GET /orders/{id} (both feed the same `mapOrder`), which needs the full
+    # order shape including line items — not just an acknowledgement. Without
+    # this, the app's own mapper crashes reading `.lines` off `undefined`.
+    line_stmt = select(OrderLine).where(OrderLine.order_id == order.id)
+    line_result = await session.execute(line_stmt)
+    lines = line_result.scalars().all()
+
+    return OrderDetailResponse(
+        id=order.id,
+        code=order.code,
+        student_id=order.student_id,
+        school_id=order.school_id,
+        vendor_id=order.vendor_id,
+        subtotal_minor=order.subtotal_minor,
+        service_fee_minor=order.service_fee_minor,
+        total_minor=order.total_minor,
+        status=order.status,
+        pickup_slot=order.pickup_slot,
+        note=order.note,
+        placed_at=order.placed_at,
+        updated_at=order.updated_at,
+        lines=lines,
+    )
