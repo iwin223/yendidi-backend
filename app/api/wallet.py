@@ -268,7 +268,7 @@ async def get_topup_status(
     return topup
 
 
-@router.patch("/wallets/{wallet_id}/controls")
+@router.patch("/wallets/{wallet_id}/controls", response_model=WalletResponse)
 async def update_wallet_controls(
     wallet_id: UUID,
     request: WalletControlUpdate,
@@ -289,10 +289,16 @@ async def update_wallet_controls(
         setattr(wallet, field_name, value)
     session.add(wallet)
     await session.commit()
-    return {"status": "ok"}
+    await session.refresh(wallet)
+    # client.ts's wallets.updateControls() maps this response through the same
+    # mapWallet() as GET /students/{id}/wallet — {"status": "ok"} silently
+    # produced a wallet object full of `undefined` fields (no crash, since
+    # this path doesn't touch .map() the way transition did, but every field
+    # the app then displayed — balance, limits, frozen — would be garbage).
+    return wallet
 
 
-@router.patch("/wallets/{wallet_id}/freeze")
+@router.patch("/wallets/{wallet_id}/freeze", response_model=WalletResponse)
 async def freeze_wallet(
     wallet_id: UUID,
     request: WalletFreezeRequest,
@@ -311,4 +317,5 @@ async def freeze_wallet(
     wallet.frozen = request.frozen
     session.add(wallet)
     await session.commit()
-    return {"status": "ok", "frozen": wallet.frozen}
+    await session.refresh(wallet)
+    return wallet
