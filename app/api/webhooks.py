@@ -29,8 +29,13 @@ async def elastic_email_webhook(request: Request, session: AsyncSession = Depend
 
 
 def verify_paystack_signature(payload: bytes, signature: str) -> bool:
-    computed = hmac.new(settings.paystack_webhook_secret.encode(), payload, hashlib.sha512).hexdigest()
-    return computed == signature
+    # Paystack has no separate webhook-signing secret — it signs with the same
+    # integration secret key used for API calls (unlike e.g. Stripe). Verifying
+    # against PAYSTACK_WEBHOOK_SECRET (a placeholder that's never matched
+    # anything Paystack actually sends) meant every real webhook call was
+    # rejected with 401 regardless of test/live mode.
+    computed = hmac.new(settings.paystack_secret_key.encode(), payload, hashlib.sha512).hexdigest()
+    return hmac.compare_digest(computed, signature or "")
 
 
 @router.post("/hubtel")

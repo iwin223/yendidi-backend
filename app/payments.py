@@ -18,9 +18,12 @@ async def create_paystack_transaction(amount_minor: int, email: str, payer_refer
     # customer record — `payer_reference` is the momo number or masked card the
     # app shows on its own receipt, which is a different thing and not always
     # (usually isn't) a valid email, so it can't be reused for this field.
-    amount_kobo = amount_minor * 100
+    #
+    # Paystack's `amount` field is already in the currency's smallest unit
+    # (pesewas for GHS) — the same unit our own amount_minor is in. Multiplying
+    # by 100 here charged the payer 100x the amount they approved.
     data = {
-        "amount": amount_kobo,
+        "amount": amount_minor,
         "email": email,
         "reference": topup_id,
         "metadata": {
