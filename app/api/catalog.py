@@ -241,13 +241,35 @@ async def update_vendor_schools(
     current_user: User = Depends(get_current_user),
     session: AsyncSession = Depends(get_session),
 ):
-    if current_user.role != Role.super_admin:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Only platform admins may assign vendor schools")
     stmt = select(Vendor).where(Vendor.id == vendor_id)
     result = await session.execute(stmt)
     vendor = result.scalar_one_or_none()
     if not vendor:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Vendor not found")
+
+    existing_stmt = select(VendorSchool.school_id).where(VendorSchool.vendor_id == vendor_id)
+    existing_result = await session.execute(existing_stmt)
+    current_school_ids = set(existing_result.scalars().all())
+    requested_school_ids = set(request.school_ids)
+
+    if current_user.role == Role.school_admin:
+        if not current_user.school_id:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not authorized to assign vendor schools")
+        # This endpoint replaces the vendor's whole school list, so a school
+        # admin is restricted to toggling only their own school's membership —
+        # every other school's assignment in the request must come back
+        # unchanged, or a school admin could rewrite a vendor's relationship
+        # with a school they have nothing to do with.
+        other_current = current_school_ids - {current_user.school_id}
+        other_requested = requested_school_ids - {current_user.school_id}
+        if other_current != other_requested:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="School admins may only change their own school's assignment to this vendor",
+            )
+    elif current_user.role != Role.super_admin:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not authorized to assign vendor schools")
+
     await session.execute(delete(VendorSchool).where(VendorSchool.vendor_id == vendor_id))
     for school_id in request.school_ids:
         session.add(VendorSchool(vendor_id=vendor_id, school_id=school_id))
