@@ -46,6 +46,15 @@ def start_of_month(at: datetime) -> datetime:
     return at.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
 
 
+def period_window_days(period: Period) -> int:
+    """A fixed rolling-window length, distinct from `period_start`'s
+    calendar-boundary meaning — used for revenue-trend comparisons
+    ("last N days vs. the N before that"), not for "since the start of this
+    calendar week/month". Mirrors VendorAnalyticsScreen.tsx's own mapping
+    exactly (`period === 'today' ? 1 : ... : 91`)."""
+    return {"today": 1, "week": 7, "month": 30, "term": 91}[period]
+
+
 def period_start(period: Period, at: Optional[datetime] = None) -> datetime:
     at = at or datetime.utcnow()
     if period == "today":

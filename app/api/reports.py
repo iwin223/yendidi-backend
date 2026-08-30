@@ -14,6 +14,7 @@ from app.core.analytics import (
     format_money,
     format_short_date,
     period_start,
+    period_window_days,
     start_of_day,
     start_of_month,
 )
@@ -344,7 +345,7 @@ async def vendor_report(
 
     now = datetime.utcnow()
     window_start = period_start(period, now)
-    trend_window_days = max(1, (start_of_day(now) - window_start).days + 1)
+    trend_window_days = period_window_days(period)
     fetch_since = min(window_start, start_of_day(now) - timedelta(days=max(days, trend_window_days * 2) - 1))
 
     orders = await _fetch_orders_with_lines(session, Order.vendor_id == vendor_id, fetch_since)
