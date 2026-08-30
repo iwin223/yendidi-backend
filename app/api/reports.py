@@ -7,8 +7,14 @@ from pydantic import BaseModel
 from sqlmodel import func, select
 
 from app.core.dependencies import get_current_user, get_session
-from app.db.models import Order, OrderLine, User, Vendor, WalletTransaction
+from app.db.models import Order, OrderLine, OrderStatus, User, Vendor, WalletTransaction
 from app.db.session import AsyncSession
+
+# Orders that represent real revenue — mirrors the client's own `isSettled()`
+# (src/data/api/analytics.ts). A cancelled or rejected order is refunded in
+# full, so counting it toward spend inflates every figure below by however
+# much a family's orders got rejected or cancelled.
+SETTLED_STATUSES = [s for s in OrderStatus if s not in (OrderStatus.cancelled, OrderStatus.rejected)]
 
 router = APIRouter()
 
@@ -53,7 +59,7 @@ async def student_report(
 ):
     if current_user.role not in {"parent", "school_admin", "super_admin"} and current_user.role != "student":
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not authorized")
-    student_orders = select(func.count(Order.id), func.coalesce(func.sum(Order.total_minor), 0), func.coalesce(func.avg(Order.total_minor), 0), func.max(Order.placed_at)).where(Order.student_id == student_id)
+    student_orders = select(func.count(Order.id), func.coalesce(func.sum(Order.total_minor), 0), func.coalesce(func.avg(Order.total_minor), 0), func.max(Order.placed_at)).where(Order.student_id == student_id, Order.status.in_(SETTLED_STATUSES))
     result = await session.execute(student_orders)
     count, total, average, last_ordered_at = result.one()
     return StudentReportResponse(
@@ -72,10 +78,10 @@ async def vendor_report(
 ):
     if current_user.role not in {"vendor", "school_admin", "super_admin"}:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not authorized")
-    revenue_stmt = select(func.count(Order.id), func.coalesce(func.sum(Order.total_minor), 0), func.coalesce(func.avg(Order.total_minor), 0)).where(Order.vendor_id == vendor_id)
+    revenue_stmt = select(func.count(Order.id), func.coalesce(func.sum(Order.total_minor), 0), func.coalesce(func.avg(Order.total_minor), 0)).where(Order.vendor_id == vendor_id, Order.status.in_(SETTLED_STATUSES))
     revenue_result = await session.execute(revenue_stmt)
     count, total, average = revenue_result.one()
-    best_seller = select(OrderLine.menu_item_id, func.count(OrderLine.id).label("popularity")).join(Order, Order.id == OrderLine.order_id).where(Order.vendor_id == vendor_id).group_by(OrderLine.menu_item_id).order_by(func.count(OrderLine.id).desc()).limit(1)
+    best_seller = select(OrderLine.menu_item_id, func.count(OrderLine.id).label("popularity")).join(Order, Order.id == OrderLine.order_id).where(Order.vendor_id == vendor_id, Order.status.in_(SETTLED_STATUSES)).group_by(OrderLine.menu_item_id).order_by(func.count(OrderLine.id).desc()).limit(1)
     best_result = await session.execute(best_seller)
     best_row = best_result.first()
     return VendorReportResponse(
@@ -94,13 +100,13 @@ async def school_report(
 ):
     if current_user.role not in {"school_admin", "super_admin"}:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not authorized")
-    order_stmt = select(func.count(Order.id), func.coalesce(func.sum(Order.total_minor), 0)).where(Order.school_id == school_id)
+    order_stmt = select(func.count(Order.id), func.coalesce(func.sum(Order.total_minor), 0)).where(Order.school_id == school_id, Order.status.in_(SETTLED_STATUSES))
     order_result = await session.execute(order_stmt)
     count, total = order_result.one()
-    student_stmt = select(func.count(func.distinct(Order.student_id))).where(Order.school_id == school_id)
+    student_stmt = select(func.count(func.distinct(Order.student_id))).where(Order.school_id == school_id, Order.status.in_(SETTLED_STATUSES))
     student_result = await session.execute(student_stmt)
     unique_students = student_result.scalar_one()
-    top_vendor_stmt = select(Order.vendor_id, func.sum(Order.total_minor).label("revenue")).where(Order.school_id == school_id).group_by(Order.vendor_id).order_by(func.sum(Order.total_minor).desc()).limit(1)
+    top_vendor_stmt = select(Order.vendor_id, func.sum(Order.total_minor).label("revenue")).where(Order.school_id == school_id, Order.status.in_(SETTLED_STATUSES)).group_by(Order.vendor_id).order_by(func.sum(Order.total_minor).desc()).limit(1)
     top_vendor_result = await session.execute(top_vendor_stmt)
     top_vendor_row = top_vendor_result.first()
     return SchoolReportResponse(
@@ -118,11 +124,11 @@ async def platform_report(
 ):
     if current_user.role != "super_admin":
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not authorized")
-    gmv_stmt = select(func.coalesce(func.sum(Order.total_minor), 0))
+    gmv_stmt = select(func.coalesce(func.sum(Order.total_minor), 0)).where(Order.status.in_(SETTLED_STATUSES))
     gmv = await session.execute(gmv_stmt)
     gmv_total = gmv.scalar_one()
     commission = int(gmv_total * 0.05)
-    leaderboard_stmt = select(Order.school_id, func.coalesce(func.sum(Order.total_minor), 0).label("revenue")).group_by(Order.school_id).order_by(func.sum(Order.total_minor).desc()).limit(5)
+    leaderboard_stmt = select(Order.school_id, func.coalesce(func.sum(Order.total_minor), 0).label("revenue")).where(Order.status.in_(SETTLED_STATUSES)).group_by(Order.school_id).order_by(func.sum(Order.total_minor).desc()).limit(5)
     leaderboard_result = await session.execute(leaderboard_stmt)
     leaderboard = [
         {"school_id": str(row[0]), "revenue_minor": int(row[1])}
