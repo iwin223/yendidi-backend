@@ -19,6 +19,7 @@ from app.db.models import (
     SubscriptionStatus,
     User,
     Role,
+    Wallet,
 )
 from app.db.session import AsyncSession
 
@@ -247,6 +248,12 @@ async def create_school_student(
         created_at=datetime.utcnow(),
     )
     session.add(student)
+    await session.flush()  # `wallet.student_id` FKs to this row — must exist before the wallet insert
+    # A student is unusable without one: no wallet means no top-up and no
+    # order can ever be placed for them. Every other creation path (seed.py)
+    # already pairs a student with a wallet; this is the real enrollment path
+    # and was silently missing it.
+    session.add(Wallet(id=uuid4(), student_id=student.id))
     await session.commit()
     await session.refresh(student)
     return student
@@ -314,6 +321,8 @@ async def import_school_students(
             created_at=datetime.utcnow(),
         )
         session.add(student)
+        await session.flush()  # `wallet.student_id` FKs to this row — must exist before the wallet insert
+        session.add(Wallet(id=uuid4(), student_id=student.id))
         imported += 1
     await session.commit()
     return SchoolEnrollmentResult(imported=imported, skipped=skipped, errors=errors)
