@@ -1,4 +1,4 @@
-from typing import List
+from typing import List, Optional
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, status
@@ -6,7 +6,7 @@ from pydantic import BaseModel
 from sqlmodel import select
 
 from app.core.dependencies import get_current_user, get_session
-from app.db.models import Guardianship, Parent, Student, User
+from app.db.models import Guardianship, Parent, Role, Student, User
 from app.db.session import AsyncSession
 
 router = APIRouter()
@@ -14,6 +14,36 @@ router = APIRouter()
 
 class ParentStudentLinkRequest(BaseModel):
     student_code: str
+
+
+class ParentProfileResponse(BaseModel):
+    id: UUID
+    user_id: UUID
+    full_name: str
+    phone: str
+    alt_phone: Optional[str]
+    occupation: Optional[str]
+
+    class Config:
+        from_attributes = True
+
+
+@router.get("/parents/{parent_id}", response_model=ParentProfileResponse)
+async def get_parent(
+    parent_id: UUID,
+    current_user: User = Depends(get_current_user),
+    session: AsyncSession = Depends(get_session),
+):
+    statement = select(Parent).where(Parent.id == parent_id)
+    result = await session.execute(statement)
+    parent = result.scalar_one_or_none()
+    if not parent:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Parent not found")
+    if current_user.role == Role.parent and parent.user_id != current_user.id:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not authorized for this parent")
+    elif current_user.role not in {Role.parent, Role.school_admin, Role.super_admin}:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not authorized for this parent")
+    return parent
 
 
 class StudentSummary(BaseModel):

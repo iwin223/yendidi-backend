@@ -1,7 +1,9 @@
+import time
+from collections import defaultdict
 from typing import Optional
 from uuid import UUID
 
-from fastapi import Depends, HTTPException, status
+from fastapi import Depends, HTTPException, Request, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlmodel import select
 from sqlmodel.ext.asyncio.session import AsyncSession
@@ -64,3 +66,30 @@ async def get_current_user_optional(
     if not user or not user.is_active:
         return None
     return user
+
+
+_rate_limit_buckets: dict[str, list[float]] = defaultdict(list)
+
+
+def rate_limiter(max_requests: int, window_seconds: int):
+    """Per-IP sliding-window limiter for anonymous, high-value endpoints (the
+    invitation token is the only secret protecting `GET/POST /invitations/{token}`
+    — see docs/SPEC_ACCOUNT_PROVISIONING.md §3.4).
+
+    In-memory rather than Redis-backed: this process has no other shared cache,
+    and a per-instance limit is still a real speed bump against token guessing,
+    even though it resets on restart and doesn't span multiple instances.
+    """
+
+    async def _check(request: Request) -> None:
+        key = f"{request.url.path}:{request.client.host if request.client else 'unknown'}"
+        now = time.monotonic()
+        bucket = _rate_limit_buckets[key]
+        cutoff = now - window_seconds
+        while bucket and bucket[0] < cutoff:
+            bucket.pop(0)
+        if len(bucket) >= max_requests:
+            raise HTTPException(status_code=status.HTTP_429_TOO_MANY_REQUESTS, detail="Too many requests. Try again shortly.")
+        bucket.append(now)
+
+    return _check

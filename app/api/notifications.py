@@ -45,6 +45,19 @@ class AnnouncementRequest(BaseModel):
     audience: List[str]
 
 
+class AnnouncementResponse(BaseModel):
+    id: UUID
+    school_id: UUID
+    author_id: UUID
+    title: str
+    body: str
+    audience: List[str]
+    created_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
 @router.get("/notifications", response_model=List[NotificationResponse])
 async def list_notifications(
     unread: Optional[bool] = Query(False),
@@ -158,3 +171,26 @@ async def create_announcement(
     session.add(announcement)
     await session.commit()
     return {"status": "ok", "announcement_id": str(announcement.id)}
+
+
+@router.get("/schools/{school_id}/announcements", response_model=List[AnnouncementResponse])
+async def list_announcements(
+    school_id: UUID,
+    current_user: User = Depends(get_current_user),
+    session: AsyncSession = Depends(get_session),
+):
+    if current_user.role == Role.school_admin and current_user.school_id != school_id:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not authorized for this school")
+    if current_user.role not in {Role.student, Role.parent, Role.vendor, Role.school_admin, Role.super_admin}:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not authorized")
+    school_stmt = select(School).where(School.id == school_id)
+    school_result = await session.execute(school_stmt)
+    if not school_result.scalar_one_or_none():
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="School not found")
+    stmt = (
+        select(Announcement)
+        .where(Announcement.school_id == school_id)
+        .order_by(Announcement.created_at.desc())
+    )
+    result = await session.execute(stmt)
+    return result.scalars().all()

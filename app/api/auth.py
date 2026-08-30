@@ -1,5 +1,5 @@
 from datetime import datetime, timedelta
-from typing import Optional
+from typing import List, Optional
 from uuid import UUID
 import secrets
 import uuid
@@ -25,6 +25,7 @@ from app.db.models import (
     OTPPurpose,
     Parent,
     RefreshToken,
+    School,
     Student,
     User,
     Vendor,
@@ -82,6 +83,15 @@ class UserResponse(BaseModel):
     phone: Optional[str]
     school_id: Optional[UUID]
     profile_id: Optional[UUID] = None
+    # Student-only. A student cannot read their own roster row — /schools/{id}
+    # and /schools/{id}/students both 403 for that role — so this is the only
+    # place these can reach the student's own screen. See docs/BACKEND_HANDOVER.md §5.
+    student_code: Optional[str] = None
+    class_name: Optional[str] = None
+    level: Optional[str] = None
+    allergies: Optional[List[str]] = None
+    dietary_notes: Optional[str] = None
+    school_name: Optional[str] = None
 
     class Config:
         from_attributes = True
@@ -315,4 +325,22 @@ async def me(
     profile_id = await _get_profile_id(current_user, session)
     response = UserResponse.from_orm(current_user)
     response.profile_id = UUID(profile_id) if profile_id else None
+
+    if current_user.role == "student":
+        student_stmt = select(Student).where(Student.user_id == current_user.id)
+        student_result = await session.execute(student_stmt)
+        student = student_result.scalar_one_or_none()
+        if student:
+            response.student_code = student.student_code
+            response.class_name = student.class_name
+            response.level = student.level
+            response.allergies = student.allergies
+            response.dietary_notes = student.dietary_notes
+            if student.school_id:
+                school_stmt = select(School).where(School.id == student.school_id)
+                school_result = await session.execute(school_stmt)
+                school = school_result.scalar_one_or_none()
+                if school:
+                    response.school_name = school.name
+
     return response

@@ -17,6 +17,7 @@ class Settings(BaseSettings):
     paystack_webhook_secret: str
     elasticemail_api_key: str
     elasticemail_sender: str
+    invitation_base_url: str = "https://y3ndidi.com/invite"
 
     model_config = ConfigDict(
         env_file=Path(__file__).resolve().parents[2] / ".env",

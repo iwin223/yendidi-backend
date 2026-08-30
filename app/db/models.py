@@ -420,3 +420,89 @@ class AuditLog(SQLModel, table=True):
     ip_address: Optional[str]
     user_agent: Optional[str]
     created_at: datetime = Field(default_factory=datetime.utcnow)
+
+
+class FavoriteTargetType(str, Enum):
+    menu_item = "menu_item"
+    vendor = "vendor"
+
+
+class Favorite(SQLModel, table=True):
+    __table_args__ = (UniqueConstraint("student_id", "target_type", "target_id", name="uq_favorite_target"),)
+
+    id: Optional[UUID] = Field(default=None, primary_key=True)
+    student_id: UUID = Field(foreign_key="student.id")
+    target_type: FavoriteTargetType
+    target_id: UUID
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+
+
+class Invitation(SQLModel, table=True):
+    """Credential-issuance token for vendors and school admins — see
+    docs/SPEC_ACCOUNT_PROVISIONING.md §3.4. Parents need no invitation; they
+    sign in by OTP the moment their account is created.
+
+    The token itself is never stored — only its SHA-256 hash — so a leaked
+    database row is not a working account-takeover link, the same treatment
+    already given to `RefreshToken.token_hash`.
+    """
+
+    id: Optional[UUID] = Field(default=None, primary_key=True)
+    user_id: UUID = Field(foreign_key="user.id")
+    token_hash: str = Field(index=True, unique=True)
+    expires_at: datetime
+    consumed_at: Optional[datetime] = None
+    revoked_at: Optional[datetime] = None
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+
+
+class VendorSubmissionStatus(str, Enum):
+    pending = "pending"
+    approved = "approved"
+    rejected = "rejected"
+
+
+class VendorSubmission(SQLModel, table=True):
+    """A school's proposal that a vendor be allowed to sell to its pupils.
+
+    Deliberately not a vendor — only a platform admin can create one of those
+    (docs/SPEC_ACCOUNT_PROVISIONING.md §2.3). Approval creates the vendor in
+    `pending`, still needing food-safety documents.
+    """
+
+    id: Optional[UUID] = Field(default=None, primary_key=True)
+    school_id: UUID = Field(foreign_key="school.id")
+    submitted_by_user_id: UUID = Field(foreign_key="user.id")
+    submitted_by_name: str
+    business_name: str
+    owner_name: str
+    phone: str
+    email: Optional[str] = None
+    description: Optional[str] = None
+    opens_at_minutes: int
+    closes_at_minutes: int
+    status: VendorSubmissionStatus = Field(default=VendorSubmissionStatus.pending)
+    submitted_at: datetime = Field(default_factory=datetime.utcnow)
+    reviewed_by_name: Optional[str] = None
+    reviewed_at: Optional[datetime] = None
+    review_note: Optional[str] = None
+    vendor_id: Optional[UUID] = Field(default=None, foreign_key="vendor.id")
+
+
+class IdempotencyRecord(SQLModel, table=True):
+    """Generic idempotency store for account-provisioning endpoints, whose
+    natural key (an admin creating an account) has no `wallet_id`-style scope
+    to piggyback on the way `Topup` does. A repeat with the same
+    (actor, scope, key) returns the first response verbatim instead of
+    creating a second account — see docs/SPEC_ACCOUNT_PROVISIONING.md §2.5.
+    """
+
+    __table_args__ = (UniqueConstraint("actor_id", "scope", "idempotency_key", name="uq_idempotency_scope_key"),)
+
+    id: Optional[UUID] = Field(default=None, primary_key=True)
+    actor_id: UUID = Field(foreign_key="user.id")
+    scope: str
+    idempotency_key: str
+    response_body: Dict[str, Any] = Field(default_factory=dict, sa_column=Column(JSON, nullable=False))
+    status_code: int = Field(default=201)
+    created_at: datetime = Field(default_factory=datetime.utcnow)
