@@ -4,6 +4,7 @@ from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel
+from sqlalchemy import and_
 from sqlmodel import func, select
 
 from app.core.analytics import (
@@ -396,10 +397,16 @@ async def vendor_report(
     vendor_id: UUID,
     period: Period = Query("week"),
     days: int = Query(7, ge=1, le=90, description="Length of the daily revenue series."),
+    school_id: Optional[UUID] = Query(
+        None,
+        description="Scope the whole report to orders placed at one school only — used by a school's own vendor-detail view (e.g. 'most ordered at your school').",
+    ),
     current_user: User = Depends(get_current_user),
     session: AsyncSession = Depends(get_session),
 ):
     if current_user.role not in {"vendor", "school_admin", "super_admin"}:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not authorized")
+    if school_id is not None and current_user.role == "school_admin" and current_user.school_id != school_id:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not authorized")
 
     now = datetime.utcnow()
@@ -407,7 +414,12 @@ async def vendor_report(
     trend_window_days = period_window_days(period)
     fetch_since = min(window_start, start_of_day(now) - timedelta(days=max(days, trend_window_days * 2) - 1))
 
-    orders = await _fetch_orders_with_lines(session, Order.vendor_id == vendor_id, fetch_since)
+    where_clause = (
+        and_(Order.vendor_id == vendor_id, Order.school_id == school_id)
+        if school_id is not None
+        else Order.vendor_id == vendor_id
+    )
+    orders = await _fetch_orders_with_lines(session, where_clause, fetch_since)
     period_orders = [o for o in orders if o.placed_at >= window_start]
     summary = _summarise(period_orders)
 
