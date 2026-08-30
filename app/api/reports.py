@@ -161,6 +161,23 @@ def _top_items(orders: List[_OrderRow], limit: int = 6) -> List[dict]:
     return items[:limit]
 
 
+def _spend_by_category(orders: List[_OrderRow], categories_by_item: Dict[str, str]) -> List[dict]:
+    tally: Dict[str, int] = {}
+    for o in orders:
+        if not _is_settled(o):
+            continue
+        for line in o.lines:
+            if not line.menu_item_id:
+                continue
+            cat = categories_by_item.get(str(line.menu_item_id))
+            if not cat:
+                continue
+            tally[cat] = tally.get(cat, 0) + line.unit_price_minor * line.quantity
+    items = [{"category": cat, "label": CATEGORY_LABEL.get(cat, cat), "value": value} for cat, value in tally.items()]
+    items.sort(key=lambda x: x["value"], reverse=True)
+    return items
+
+
 def _best_seller_item_id(orders: List[_OrderRow]) -> Optional[str]:
     tally: Dict[str, int] = {}
     for o in orders:
@@ -198,13 +215,6 @@ class ExportResult(BaseModel):
     url: str
 
 
-class StudentReportResponse(BaseModel):
-    total_spent_minor: int
-    orders_count: int
-    average_order_minor: int
-    last_ordered_at: datetime | None
-
-
 class SeriesPoint(BaseModel):
     label: str
     value: int
@@ -214,6 +224,29 @@ class TopItem(BaseModel):
     label: str
     value: int
     revenue_minor: int
+
+
+class CategorySpend(BaseModel):
+    category: str
+    label: str
+    value: int
+
+
+class PeriodSummary(BaseModel):
+    revenue_minor: int
+    orders_count: int
+    average_order_minor: int
+
+
+class StudentReportResponse(BaseModel):
+    total_spent_minor: int
+    orders_count: int
+    average_order_minor: int
+    last_ordered_at: datetime | None
+    period_summary: PeriodSummary
+    revenue_by_day: List[SeriesPoint]
+    spend_by_category: List[CategorySpend]
+    top_items: List[TopItem]
 
 
 class RevenueTrend(BaseModel):
@@ -311,11 +344,14 @@ class VendorForecastResponse(BaseModel):
 @router.get("/reports/student/{student_id}", response_model=StudentReportResponse)
 async def student_report(
     student_id: UUID,
+    period: Period = Query("month", description="Scopes period_summary/revenue_by_day/spend_by_category/top_items only — the top-level totals are always all-time."),
+    days: int = Query(14, ge=1, le=90, description="Length of the daily revenue series."),
     current_user: User = Depends(get_current_user),
     session: AsyncSession = Depends(get_session),
 ):
     if current_user.role not in {"parent", "school_admin", "super_admin"} and current_user.role != "student":
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not authorized")
+
     student_orders = select(
         func.count(Order.id),
         func.coalesce(func.sum(Order.total_minor), 0),
@@ -324,11 +360,34 @@ async def student_report(
     ).where(Order.student_id == student_id, Order.status.in_(SETTLED_STATUSES))
     result = await session.execute(student_orders)
     count, total, average, last_ordered_at = result.one()
+
+    now = datetime.utcnow()
+    window_start = period_start(period, now)
+    fetch_since = min(window_start, start_of_day(now) - timedelta(days=days - 1))
+    orders = await _fetch_orders_with_lines(session, Order.student_id == student_id, fetch_since)
+    period_orders = [o for o in orders if o.placed_at >= window_start]
+    period_summary = _summarise(period_orders)
+
+    menu_item_ids = {line.menu_item_id for o in period_orders for line in o.lines if line.menu_item_id}
+    categories_by_item: Dict[str, str] = {}
+    if menu_item_ids:
+        mi_result = await session.execute(select(MenuItem.id, MenuItem.category).where(MenuItem.id.in_(menu_item_ids)))
+        for mid, cat in mi_result.all():
+            categories_by_item[str(mid)] = getattr(cat, "value", cat)
+
     return StudentReportResponse(
         total_spent_minor=int(total),
         orders_count=int(count),
         average_order_minor=int(average or 0),
         last_ordered_at=last_ordered_at,
+        period_summary=PeriodSummary(
+            revenue_minor=period_summary["revenue_minor"],
+            orders_count=period_summary["orders_count"],
+            average_order_minor=period_summary["average_order_minor"],
+        ),
+        revenue_by_day=[SeriesPoint(**p) for p in _revenue_by_day(orders, days, now)],
+        spend_by_category=[CategorySpend(**c) for c in _spend_by_category(period_orders, categories_by_item)],
+        top_items=[TopItem(**i) for i in _top_items(period_orders, 5)],
     )
 
 
