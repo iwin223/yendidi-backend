@@ -1,3 +1,4 @@
+import logging
 from datetime import datetime, timedelta
 from typing import List, Optional
 from uuid import UUID
@@ -33,6 +34,7 @@ from app.db.models import (
 from app.db.session import AsyncSession
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
 
 
 class LoginRequest(BaseModel):
@@ -129,10 +131,21 @@ async def _get_profile_id(user: User, session: AsyncSession) -> Optional[str]:
 
 async def _send_otp(user: User, code: str, purpose: OTPPurpose) -> None:
     if not user.email:
+        if settings.debug_log_otp_on_delivery_failure:
+            logger.warning("OTP for %s (%s): %s — no email on file, not delivered", user.id, purpose, code)
+            return
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="No email available for OTP delivery")
     subject = "Your Y3ndidi login code"
     body = f"Your verification code is {code}. It expires in 10 minutes."
-    await send_email(user.email, subject, body, body)
+    try:
+        await send_email(user.email, subject, body, body)
+    except Exception:
+        if not settings.debug_log_otp_on_delivery_failure:
+            raise
+        # Only reached with the flag on, which defaults off and is meant for a
+        # local instance with no working email provider — never trust this
+        # branch to be unreachable in a real deployment.
+        logger.warning("OTP for %s (%s): %s — email delivery failed, logged instead", user.id, purpose, code)
 
 
 @router.post("/otp/request")
@@ -246,9 +259,6 @@ async def refresh_token(request: RefreshRequest, session: AsyncSession = Depends
 
     new_refresh_plain = create_refresh_token()
     replacement_id = uuid.uuid4()
-    refresh.revoked_at = datetime.utcnow()
-    refresh.replaced_by = replacement_id
-    session.add(refresh)
     session.add(
         RefreshToken(
             id=replacement_id,
@@ -259,6 +269,14 @@ async def refresh_token(request: RefreshRequest, session: AsyncSession = Depends
             created_at=datetime.utcnow(),
         )
     )
+    # Flushed before the old row is revoked: `replaced_by` is a plain FK column
+    # with no ORM relationship tying the two rows together, so the unit of work
+    # has no dependency to order by and can flush this update before the insert
+    # it points at — which asyncpg then rejects outright.
+    await session.flush()
+    refresh.revoked_at = datetime.utcnow()
+    refresh.replaced_by = replacement_id
+    session.add(refresh)
     await session.commit()
 
     profile_id = await _get_profile_id(user, session)

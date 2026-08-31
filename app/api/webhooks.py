@@ -38,23 +38,6 @@ def verify_paystack_signature(payload: bytes, signature: str) -> bool:
     return hmac.compare_digest(computed, signature or "")
 
 
-@router.post("/hubtel")
-async def hubtel_webhook(request: Request, session: AsyncSession = Depends(get_session)):
-    payload = await request.json()
-    event = WebhookEvent(
-        id=uuid4(),
-        provider="hubtel",
-        event_type=payload.get("EventType", payload.get("ResponseCode", "unknown")),
-        payload=payload,
-    )
-    session.add(event)
-    await session.commit()
-
-    if payload.get("ResponseCode") != "0000":
-        return {"status": "ignored"}
-    return {"status": "received"}
-
-
 @router.post("/paystack")
 async def paystack_webhook(request: Request, x_paystack_signature: str = Header(None), session: AsyncSession = Depends(get_session)):
     body = await request.body()

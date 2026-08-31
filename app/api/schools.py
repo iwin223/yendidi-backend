@@ -11,6 +11,7 @@ from sqlmodel import select
 from app.core.dependencies import get_current_user, get_session
 from app.db.models import (
     Announcement,
+    Guardianship,
     School,
     SchoolStatus,
     Student,
@@ -91,6 +92,7 @@ class SchoolStudentResponse(BaseModel):
     level: str
     allergies: List[str]
     dietary_notes: Optional[str]
+    guardian_ids: List[UUID] = []
 
     class Config:
         from_attributes = True
@@ -206,7 +208,30 @@ async def list_school_students(
     if class_name:
         query = query.where(Student.class_name == class_name)
     result = await session.execute(query)
-    return result.scalars().all()
+    students = result.scalars().all()
+
+    guardian_ids_by_student: dict[UUID, List[UUID]] = {}
+    if students:
+        student_ids = [s.id for s in students]
+        guard_stmt = select(Guardianship).where(Guardianship.student_id.in_(student_ids))
+        guard_result = await session.execute(guard_stmt)
+        for guardianship in guard_result.scalars().all():
+            guardian_ids_by_student.setdefault(guardianship.student_id, []).append(guardianship.parent_id)
+
+    return [
+        SchoolStudentResponse(
+            id=s.id,
+            student_code=s.student_code,
+            first_name=s.first_name,
+            last_name=s.last_name,
+            class_name=s.class_name,
+            level=s.level,
+            allergies=s.allergies,
+            dietary_notes=s.dietary_notes,
+            guardian_ids=guardian_ids_by_student.get(s.id, []),
+        )
+        for s in students
+    ]
 
 
 @router.post("/schools/{school_id}/students", response_model=SchoolStudentResponse)

@@ -18,6 +18,10 @@ class Settings(BaseSettings):
     elasticemail_api_key: str
     elasticemail_sender: str
     invitation_base_url: str = "https://y3ndidi.com/invite"
+    # Off by default so a production deployment that forgets to set it still
+    # fails closed — an undeliverable OTP is a blocked sign-in, not a code
+    # printed to a log a production operator can read.
+    debug_log_otp_on_delivery_failure: bool = False
 
     model_config = ConfigDict(
         env_file=Path(__file__).resolve().parents[2] / ".env",
