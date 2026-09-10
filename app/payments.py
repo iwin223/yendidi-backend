@@ -7,6 +7,14 @@ from app.core.config import settings
 PAYSTACK_INITIALIZE_URL = "https://api.paystack.co/transaction/initialize"
 PAYSTACK_VERIFY_URL = "https://api.paystack.co/transaction/verify"
 
+# Not a real page — nothing is listening on the other end. It hosts the
+# checkout in its own in-app WebView and watches every navigation for this
+# exact prefix, closing the sheet once Paystack navigates there. A same-scheme
+# https URL is what every WebView engine navigates (and therefore reports to
+# the watcher) reliably; a custom app:// scheme is not guaranteed to reach
+# that callback on every device, so this is the safer choice.
+PAYSTACK_CALLBACK_URL = "https://y3ndidi.com/paystack/callback"
+
 
 class PaystackError(Exception):
     """Raised when Paystack rejects or fails a transaction request. Carries the
@@ -27,6 +35,7 @@ async def create_paystack_transaction(amount_minor: int, email: str, payer_refer
         "amount": amount_minor,
         "email": email,
         "reference": topup_id,
+        "callback_url": PAYSTACK_CALLBACK_URL,
         "metadata": {
             "topup_id": topup_id,
             "payer_reference": payer_reference,
