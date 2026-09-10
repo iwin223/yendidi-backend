@@ -3,6 +3,7 @@ from typing import List, Optional
 from uuid import UUID, uuid4
 
 from fastapi import APIRouter, Depends, HTTPException, Header, status
+from fastapi.encoders import jsonable_encoder
 from pydantic import BaseModel
 from sqlmodel import select
 
@@ -11,6 +12,7 @@ from app.core.dependencies import get_current_user, get_session
 from app.db.models import (
     AuditLog,
     Guardianship,
+    IdempotencyRecord,
     Parent,
     Role,
     Student,
@@ -240,6 +242,7 @@ async def create_topup(
 async def record_cash_topup(
     wallet_id: UUID,
     request: CashTopUpRequest,
+    idempotency_key: Optional[str] = Header(None, alias="idempotency-key"),
     current_user: User = Depends(get_current_user),
     session: AsyncSession = Depends(get_session),
 ):
@@ -251,9 +254,27 @@ async def record_cash_topup(
     here: attribution from the bearer token (never a client-supplied actor
     id), the GH₵1–200 band rejected rather than clamped, and a frozen wallet
     refused outright.
+
+    Required, not optional, like `create_topup`'s: this credits a wallet
+    exactly once for money that already changed hands, so a client retry
+    after a dropped connection must replay the first result rather than
+    crediting the pupil twice for one handful of notes.
     """
+    if not idempotency_key:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Idempotency-Key header required")
+
     if current_user.role not in (Role.school_admin, Role.super_admin):
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Only a school administrator may record a cash top-up")
+
+    replay_stmt = select(IdempotencyRecord).where(
+        IdempotencyRecord.actor_id == current_user.id,
+        IdempotencyRecord.scope == "cash_topup",
+        IdempotencyRecord.idempotency_key == idempotency_key,
+    )
+    replay_result = await session.execute(replay_stmt)
+    replay = replay_result.scalar_one_or_none()
+    if replay:
+        return CashTopUpResponse(**replay.response_body)
 
     wallet_stmt = select(Wallet).where(Wallet.id == wallet_id)
     wallet_result = await session.execute(wallet_stmt)
@@ -313,10 +334,22 @@ async def record_cash_topup(
         )
     )
 
-    await session.commit()
+    await session.flush()
     await session.refresh(transaction)
+    response = CashTopUpResponse(transaction_id=transaction.id, balance_minor=new_balance, recorded_at=transaction.created_at)
 
-    return CashTopUpResponse(transaction_id=transaction.id, balance_minor=new_balance, recorded_at=transaction.created_at)
+    session.add(
+        IdempotencyRecord(
+            id=uuid4(),
+            actor_id=current_user.id,
+            scope="cash_topup",
+            idempotency_key=idempotency_key,
+            response_body=jsonable_encoder(response),
+        )
+    )
+    await session.commit()
+
+    return response
 
 
 @router.get("/students/{student_id}/wallet", response_model=WalletResponse)

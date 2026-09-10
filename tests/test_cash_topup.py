@@ -131,6 +131,7 @@ def test_school_admin_records_a_cash_topup(client, seeded):
     resp = client.post(
         f"/v1/wallets/{seeded['wallet_id']}/cash-topups",
         json={"amount_minor": 5000, "note": "RCPT-42"},
+        headers={"idempotency-key": str(uuid4())},
     )
     assert resp.status_code == 200, resp.text
     body = resp.json()
@@ -163,11 +164,45 @@ def test_school_admin_records_a_cash_topup(client, seeded):
     run(_check_rows())
 
 
+def test_missing_idempotency_key_is_rejected(client, seeded):
+    as_user(seeded["school_admin"])
+    resp = client.post(
+        f"/v1/wallets/{seeded['wallet_id']}/cash-topups",
+        json={"amount_minor": 100},
+    )
+    assert resp.status_code == 400
+
+
+def test_a_retried_request_replays_the_first_result_instead_of_crediting_twice(client, seeded):
+    balance_before = _wallet_balance(seeded["wallet_id"])
+    key = str(uuid4())
+
+    as_user(seeded["school_admin"])
+    first = client.post(
+        f"/v1/wallets/{seeded['wallet_id']}/cash-topups",
+        json={"amount_minor": 1500},
+        headers={"idempotency-key": key},
+    )
+    assert first.status_code == 200, first.text
+
+    # Same key, as a network retry of the same tap would send — must not
+    # credit the wallet a second time for one handful of cash.
+    second = client.post(
+        f"/v1/wallets/{seeded['wallet_id']}/cash-topups",
+        json={"amount_minor": 1500},
+        headers={"idempotency-key": key},
+    )
+    assert second.status_code == 200, second.text
+    assert second.json() == first.json()
+    assert _wallet_balance(seeded["wallet_id"]) == balance_before + 1500
+
+
 def test_super_admin_may_also_record_a_cash_topup(client, seeded):
     as_user(seeded["super_admin"])
     resp = client.post(
         f"/v1/wallets/{seeded['wallet_id']}/cash-topups",
         json={"amount_minor": 100},
+        headers={"idempotency-key": str(uuid4())},
     )
     assert resp.status_code == 200, resp.text
 
@@ -177,6 +212,7 @@ def test_parent_cannot_record_a_cash_topup(client, seeded):
     resp = client.post(
         f"/v1/wallets/{seeded['wallet_id']}/cash-topups",
         json={"amount_minor": 100},
+        headers={"idempotency-key": str(uuid4())},
     )
     assert resp.status_code == 403
 
@@ -186,6 +222,7 @@ def test_a_school_admin_from_another_school_cannot_credit_this_wallet(client, se
     resp = client.post(
         f"/v1/wallets/{seeded['wallet_id']}/cash-topups",
         json={"amount_minor": 100},
+        headers={"idempotency-key": str(uuid4())},
     )
     assert resp.status_code == 403
 
@@ -195,6 +232,7 @@ def test_amount_below_the_floor_is_rejected(client, seeded):
     resp = client.post(
         f"/v1/wallets/{seeded['wallet_id']}/cash-topups",
         json={"amount_minor": 50},
+        headers={"idempotency-key": str(uuid4())},
     )
     assert resp.status_code == 400
 
@@ -206,6 +244,7 @@ def test_amount_above_the_ceiling_is_rejected_not_clamped(client, seeded):
     resp = client.post(
         f"/v1/wallets/{seeded['wallet_id']}/cash-topups",
         json={"amount_minor": 20_001},
+        headers={"idempotency-key": str(uuid4())},
     )
     assert resp.status_code == 400
     assert _wallet_balance(seeded["wallet_id"]) == balance_before
@@ -216,6 +255,7 @@ def test_a_frozen_wallet_refuses_cash(client, seeded):
     resp = client.post(
         f"/v1/wallets/{seeded['frozen_wallet_id']}/cash-topups",
         json={"amount_minor": 100},
+        headers={"idempotency-key": str(uuid4())},
     )
     assert resp.status_code == 409
 
@@ -225,5 +265,6 @@ def test_unknown_wallet_is_404(client, seeded):
     resp = client.post(
         f"/v1/wallets/{uuid4()}/cash-topups",
         json={"amount_minor": 100},
+        headers={"idempotency-key": str(uuid4())},
     )
     assert resp.status_code == 404
