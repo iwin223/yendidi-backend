@@ -24,7 +24,7 @@ from app.db.models import (
     WalletTransaction,
 )
 from app.db.session import AsyncSession
-from app.payments import PaystackError, create_paystack_transaction
+from app.payments import PaystackError, create_paystack_transaction, verify_paystack_transaction
 
 router = APIRouter()
 
@@ -391,6 +391,15 @@ async def get_wallet_transactions(
     return transaction_result.scalars().all()
 
 
+# Paystack's own transaction-status vocabulary, mapped to ours. Only two
+# buckets actually end the wait: everything else (pending, ongoing, queued,
+# processing — Paystack uses several depending on the channel) means "still
+# nothing to report," so the topup is left exactly as it was rather than
+# guessed at.
+_PAYSTACK_SUCCESS_STATUSES = {"success"}
+_PAYSTACK_FAILURE_STATUSES = {"failed", "abandoned", "reversed"}
+
+
 @router.get("/topups/{topup_id}", response_model=TopupStatusResponse)
 async def get_topup_status(
     topup_id: UUID,
@@ -409,6 +418,36 @@ async def get_topup_status(
     if not wallet:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Wallet not found")
     await ensure_wallet_access(wallet, current_user, session)
+
+    # The webhook is the fast path, not the only path — it has nowhere to be
+    # delivered at all against a developer's own machine, and even in
+    # production can be delayed or dropped. A client polling a still-pending
+    # topup gets an active check against Paystack here rather than sitting on
+    # a row nothing will ever update. Importing from the webhook module
+    # (rather than duplicating the crediting logic) keeps exactly one place
+    # that ever moves money for a topup, whichever path notices success first.
+    if topup.status == TopupStatus.pending:
+        from app.api.webhooks import apply_successful_topup  # local import: avoids a module-load-order cycle with webhooks.py
+
+        try:
+            data = await verify_paystack_transaction(str(topup.id))
+        except PaystackError:
+            # Paystack being unreachable or the reference not existing yet
+            # (initialize and verify can race by a second) is not this
+            # request's problem to surface — the client just polls again.
+            return topup
+
+        paystack_status = data.get("status")
+        if paystack_status in _PAYSTACK_SUCCESS_STATUSES:
+            await apply_successful_topup(topup, session, processor_ref=data.get("reference"))
+            await session.refresh(topup)
+        elif paystack_status in _PAYSTACK_FAILURE_STATUSES:
+            topup.status = TopupStatus.failed
+            topup.failure_reason = data.get("gateway_response") or f"Paystack reported: {paystack_status}"
+            session.add(topup)
+            await session.commit()
+            await session.refresh(topup)
+
     return topup
 
 

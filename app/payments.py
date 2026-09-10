@@ -5,6 +5,7 @@ import httpx
 from app.core.config import settings
 
 PAYSTACK_INITIALIZE_URL = "https://api.paystack.co/transaction/initialize"
+PAYSTACK_VERIFY_URL = "https://api.paystack.co/transaction/verify"
 
 
 class PaystackError(Exception):
@@ -51,4 +52,37 @@ async def create_paystack_transaction(amount_minor: int, email: str, payer_refer
         payload = response.json()
         if not payload.get("status"):
             raise PaystackError(payload.get("message", "Paystack initialization failed"))
+        return payload.get("data", {})
+
+
+async def verify_paystack_transaction(reference: str) -> Dict[str, Any]:
+    """Asks Paystack directly whether a transaction actually settled.
+
+    The webhook is the fast path, not the only path: it is fire-and-forget
+    from Paystack's side, has nowhere to be delivered at all against a
+    developer's own machine, and even in production can be delayed, dropped,
+    or missed. Anything polling a topup's status (`GET /topups/{id}`) needs
+    a way to find out the truth directly rather than sit forever on a row a
+    webhook never reached — this is that way, and it is the same lookup
+    Paystack recommends for exactly this reason.
+    """
+    async with httpx.AsyncClient() as client:
+        try:
+            response = await client.get(
+                f"{PAYSTACK_VERIFY_URL}/{reference}",
+                headers={"Authorization": f"Bearer {settings.paystack_secret_key}"},
+                timeout=30,
+            )
+            response.raise_for_status()
+        except httpx.HTTPStatusError as exc:
+            try:
+                message = exc.response.json().get("message", "Paystack rejected the verification request.")
+            except ValueError:
+                message = "Paystack rejected the verification request."
+            raise PaystackError(message) from exc
+        except httpx.HTTPError as exc:
+            raise PaystackError("Could not reach Paystack. Please try again.") from exc
+        payload = response.json()
+        if not payload.get("status"):
+            raise PaystackError(payload.get("message", "Paystack verification failed"))
         return payload.get("data", {})

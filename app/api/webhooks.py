@@ -1,6 +1,7 @@
 import hashlib
 import hmac
 from datetime import datetime
+from typing import Optional
 from uuid import uuid4
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Request, status
@@ -38,6 +39,46 @@ def verify_paystack_signature(payload: bytes, signature: str) -> bool:
     return hmac.compare_digest(computed, signature or "")
 
 
+async def apply_successful_topup(topup: Topup, session: AsyncSession, processor_ref: Optional[str] = None) -> None:
+    """Credits the wallet for a topup Paystack has confirmed succeeded.
+
+    The one place this money movement happens, called from two directions:
+    the webhook (the fast path, when Paystack reaches us) and the polling
+    fallback in `GET /topups/{id}` (when it can't — always true against a
+    developer's own machine, and possible even in production). Idempotent on
+    `topup.status` so whichever of the two arrives first does the crediting
+    and the other is a no-op, rather than both racing to credit it twice.
+    """
+    if topup.status == TopupStatus.succeeded:
+        return
+
+    topup.status = TopupStatus.succeeded
+    topup.processor_ref = processor_ref
+    topup.settled_at = datetime.utcnow()
+    session.add(topup)
+
+    wallet_stmt = select(Wallet).where(Wallet.id == topup.wallet_id)
+    wallet_result = await session.execute(wallet_stmt)
+    wallet = wallet_result.scalar_one_or_none()
+    if wallet:
+        wallet.balance_minor += topup.amount_minor
+        session.add(wallet)
+        txn = WalletTransaction(
+            id=uuid4(),
+            wallet_id=wallet.id,
+            student_id=wallet.student_id,
+            type="topup",
+            amount_minor=topup.amount_minor,
+            balance_after_minor=wallet.balance_minor,
+            description="Wallet top-up via Paystack",
+            reference=processor_ref or str(topup.id),
+            created_at=datetime.utcnow(),
+        )
+        session.add(txn)
+
+    await session.commit()
+
+
 @router.post("/paystack")
 async def paystack_webhook(request: Request, x_paystack_signature: str = Header(None), session: AsyncSession = Depends(get_session)):
     body = await request.body()
@@ -48,7 +89,6 @@ async def paystack_webhook(request: Request, x_paystack_signature: str = Header(
     event = payload.get("event")
     data = payload.get("data", {})
     reference = data.get("reference")
-    status_value = data.get("status")
 
     event_record = WebhookEvent(
         id=uuid4(),
@@ -71,29 +111,5 @@ async def paystack_webhook(request: Request, x_paystack_signature: str = Header(
     if topup.status == TopupStatus.succeeded:
         return {"status": "already_processed"}
 
-    topup.status = TopupStatus.succeeded
-    topup.processor_ref = data.get("reference")
-    topup.settled_at = datetime.utcnow()
-    session.add(topup)
-
-    wallet_stmt = select(Wallet).where(Wallet.id == topup.wallet_id)
-    wallet_result = await session.execute(wallet_stmt)
-    wallet = wallet_result.scalar_one_or_none()
-    if wallet:
-        wallet.balance_minor += topup.amount_minor
-        session.add(wallet)
-        txn = WalletTransaction(
-            id=uuid4(),
-            wallet_id=wallet.id,
-            student_id=wallet.student_id,
-            type="topup",
-            amount_minor=topup.amount_minor,
-            balance_after_minor=wallet.balance_minor,
-            description="Wallet top-up via Paystack",
-            reference=topup.processor_ref or reference,
-            created_at=datetime.utcnow(),
-        )
-        session.add(txn)
-
-    await session.commit()
+    await apply_successful_topup(topup, session, processor_ref=reference)
     return {"status": "processed"}
