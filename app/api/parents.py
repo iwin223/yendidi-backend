@@ -12,10 +12,6 @@ from app.db.session import AsyncSession
 router = APIRouter()
 
 
-class ParentStudentLinkRequest(BaseModel):
-    student_code: str
-
-
 class ParentProfileResponse(BaseModel):
     id: UUID
     user_id: UUID
@@ -79,29 +75,14 @@ async def list_parent_students(
     return result.scalars().all()
 
 
-@router.post("/parents/{parent_id}/students", response_model=StudentSummary)
-async def link_parent_student(
-    parent_id: UUID,
-    request: ParentStudentLinkRequest,
-    current_user: User = Depends(get_current_user),
-    session: AsyncSession = Depends(get_session),
-):
-    parent = await _current_parent(parent_id, current_user, session)
-    student_stmt = select(Student).where(Student.student_code == request.student_code)
-    student_result = await session.execute(student_stmt)
-    student = student_result.scalar_one_or_none()
-    if not student:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Student not found")
-
-    guard_stmt = select(Guardianship).where(Guardianship.parent_id == parent.id, Guardianship.student_id == student.id)
-    guard_result = await session.execute(guard_stmt)
-    if guard_result.scalar_one_or_none():
-        return student
-
-    guardianship = Guardianship(parent_id=parent.id, student_id=student.id)
-    session.add(guardianship)
-    await session.commit()
-    return student
+# `POST /parents/{id}/students` (bare student-code → instant link) is
+# deliberately gone, not deprecated-in-place. A student code is a school
+# prefix and four digits — about a thousand per school — printed on a card a
+# child carries around all day; an endpoint that links on a bare match lets
+# any parent account walk that range and become guardian to a stranger's
+# child. `POST /guardian-link-requests` (guardian_links.py) replaces it with
+# a request the school must approve. Dead code that reintroduces a hole if
+# ever rewired is worse than no code at all — see BACKEND_HANDOVER.md §2.1a.
 
 
 @router.delete("/parents/{parent_id}/students/{student_id}")

@@ -29,6 +29,8 @@ class VendorSummary(BaseModel):
     owner_name: str
     rating: float
     accepting_orders: bool
+    opens_at_minutes: int
+    closes_at_minutes: int
 
     class Config:
         from_attributes = True

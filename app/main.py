@@ -7,6 +7,8 @@ from app.api import (
     auth,
     catalog,
     favorites,
+    guardian_links,
+    kiosk,
     notifications,
     orders,
     parents,
@@ -37,6 +39,8 @@ router.include_router(accounts.router, prefix="", tags=["accounts"])
 router.include_router(vendor_submissions.router, prefix="", tags=["vendor-submissions"])
 router.include_router(favorites.router, prefix="", tags=["favorites"])
 router.include_router(admin.router, prefix="", tags=["admin"])
+router.include_router(guardian_links.router, prefix="", tags=["guardian-links"])
+router.include_router(kiosk.router, prefix="", tags=["kiosk"])
 router.include_router(webhooks.router, prefix="/webhooks", tags=["webhooks"])
 
 app.include_router(router)

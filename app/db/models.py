@@ -139,7 +139,11 @@ class Invoice(SQLModel, table=True):
 
 class Student(SQLModel, table=True):
     id: Optional[UUID] = Field(default=None, primary_key=True)
-    user_id: UUID = Field(foreign_key="user.id", unique=True)
+    # Nullable since the kiosk pivot (SPEC_KIOSK_AND_VERIFICATION.md): a pupil
+    # is a students row and a wallets row, never a login, so nothing mints a
+    # `user` for one any more. Old rows keep whatever `user_id` they already
+    # had; new ones are enrolled with none.
+    user_id: Optional[UUID] = Field(default=None, foreign_key="user.id", unique=True)
     school_id: UUID = Field(foreign_key="school.id")
     student_code: str
     first_name: str
@@ -320,12 +324,14 @@ class Topup(SQLModel, table=True):
 
 
 class OrderStatus(str, Enum):
-    pending = "pending"
-    accepted = "accepted"
-    preparing = "preparing"
-    ready = "ready"
-    completed = "completed"
-    rejected = "rejected"
+    # The wallet is debited at checkout, so "paid" is the whole order until
+    # the vendor acts on it — no kitchen-stage pipeline in between. From
+    # there the vendor has exactly one decision to make: confirm it, or
+    # cancel it (which refunds the wallet in full). There is no
+    # student-initiated cancel and no separate "rejected" state — one vendor
+    # action, one terminal outcome either way.
+    paid = "paid"
+    confirmed = "confirmed"
     cancelled = "cancelled"
 
 
@@ -338,7 +344,7 @@ class Order(SQLModel, table=True):
     subtotal_minor: int
     service_fee_minor: int
     total_minor: int
-    status: OrderStatus = Field(default=OrderStatus.pending)
+    status: OrderStatus = Field(default=OrderStatus.paid)
     pickup_slot: str
     note: Optional[str]
     idempotency_key: Optional[str] = Field(default=None, sa_column=Column(String, unique=True, nullable=True))
@@ -487,6 +493,101 @@ class VendorSubmission(SQLModel, table=True):
     reviewed_at: Optional[datetime] = None
     review_note: Optional[str] = None
     vendor_id: Optional[UUID] = Field(default=None, foreign_key="vendor.id")
+
+
+class GuardianLinkStatus(str, Enum):
+    pending = "pending"
+    approved = "approved"
+    rejected = "rejected"
+
+
+class GuardianLinkRequest(SQLModel, table=True):
+    """A parent's claim to a pupil, gated on the school's confirmation.
+
+    Replaces linking on a bare student-code match (BACKEND_HANDOVER.md §2.1a):
+    a code is a school prefix and four digits, printed on a card a child
+    carries all day, so an instant link let any account walk the range and
+    become guardian to a stranger's child. The school holds the register and
+    is the only party that can actually verify which adult belongs to which
+    pupil — not the platform admin, who would only be rubber-stamping.
+    """
+
+    id: Optional[UUID] = Field(default=None, primary_key=True)
+    parent_id: UUID = Field(foreign_key="parent.id")
+    student_id: UUID = Field(foreign_key="student.id")
+    school_id: UUID = Field(foreign_key="school.id")
+    status: GuardianLinkStatus = Field(default=GuardianLinkStatus.pending)
+    reviewed_by_name: Optional[str] = None
+    reviewed_at: Optional[datetime] = None
+    reject_reason: Optional[str] = None
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+
+
+class GuardianLinkAttempt(SQLModel, table=True):
+    """One row per `POST /guardian-link-requests` call, valid code or not.
+
+    A request for an unknown code creates no `GuardianLinkRequest` — there is
+    nothing to review — so without a separate record of the attempt itself,
+    rate-limiting has nothing to count and an attacker can walk the ~1,000
+    codes per school for free. This table exists only to be counted against
+    over a rolling window.
+    """
+
+    id: Optional[UUID] = Field(default=None, primary_key=True)
+    parent_id: UUID = Field(foreign_key="parent.id")
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+
+
+class KioskStatus(str, Enum):
+    pending = "pending"
+    active = "active"
+    revoked = "revoked"
+
+
+class Kiosk(SQLModel, table=True):
+    """A shared ordering device belonging to a school, not a person
+    (SPEC_KIOSK_AND_VERIFICATION.md §2.1). Provisioned with a one-time pairing
+    code; the device exchanges it once for a long-lived token and the code is
+    never usable again. A kiosk token can read only its own school's menu,
+    call verify, and place orders that carry a spent verification token — it
+    cannot read a pupil record, a wallet, or another school's anything, on
+    the assumption that a device in a corridor is compromised.
+    """
+
+    id: Optional[UUID] = Field(default=None, primary_key=True)
+    school_id: UUID = Field(foreign_key="school.id")
+    label: str
+    status: KioskStatus = Field(default=KioskStatus.pending)
+    pairing_code_hash: Optional[str] = None
+    pairing_code_expires_at: Optional[datetime] = None
+    device_token_hash: Optional[str] = Field(default=None, unique=True)
+    # Set once at provisioning and checked entirely device-side by
+    # `POST /kiosks/exit`. Short and shared knowledge among on-site staff
+    # rather than a personal credential — leaking it stops kiosk service (a
+    # nuisance), never data, since the device holds none. It exists so a
+    # device can be taken out of service by whoever is standing next to it,
+    # without needing an admin's JWT.
+    exit_pin_hash: Optional[str] = None
+    paired_at: Optional[datetime] = None
+    last_seen_at: Optional[datetime] = None
+    revoked_at: Optional[datetime] = None
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+
+
+class KioskVerification(SQLModel, table=True):
+    """The single-use token minted by `POST /kiosks/verify` and spent by the
+    order it authorises (§9.3–9.4). Short-lived and one-shot on purpose: it is
+    a checkout context scoped to one transaction, not a standing credential —
+    that distinction is what makes it safe to hand to a device in a corridor.
+    """
+
+    id: Optional[UUID] = Field(default=None, primary_key=True)
+    token_hash: str = Field(index=True, unique=True)
+    kiosk_id: UUID = Field(foreign_key="kiosk.id")
+    student_id: UUID = Field(foreign_key="student.id")
+    expires_at: datetime
+    used_at: Optional[datetime] = None
+    created_at: datetime = Field(default_factory=datetime.utcnow)
 
 
 class IdempotencyRecord(SQLModel, table=True):

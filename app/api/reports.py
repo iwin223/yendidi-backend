@@ -43,10 +43,10 @@ from app.db.models import (
 from app.db.session import AsyncSession
 
 # Orders that represent real revenue — mirrors the client's own `isSettled()`
-# (src/data/api/analytics.ts). A cancelled or rejected order is refunded in
-# full, so counting it toward spend/revenue inflates every figure below by
-# however much got rejected or cancelled.
-SETTLED_STATUSES = [s for s in OrderStatus if s not in (OrderStatus.cancelled, OrderStatus.rejected)]
+# (src/data/api/analytics.ts). A cancelled order is refunded in full, so
+# counting it toward spend/revenue inflates every figure below by however
+# much got cancelled.
+SETTLED_STATUSES = [s for s in OrderStatus if s != OrderStatus.cancelled]
 
 router = APIRouter()
 
@@ -101,7 +101,7 @@ async def _fetch_orders_with_lines(session: AsyncSession, where_clause, since: d
 
 
 def _is_settled(o: _OrderRow) -> bool:
-    return o.status not in (OrderStatus.cancelled, OrderStatus.rejected)
+    return o.status in SETTLED_STATUSES
 
 
 def _js_day_of_week(dt: datetime) -> int:
@@ -274,7 +274,6 @@ class VendorPerformanceItem(BaseModel):
     orders: int
     revenue_minor: int
     rating: float
-    rejection_rate: int
 
 
 class SchoolReportResponse(BaseModel):
@@ -466,14 +465,12 @@ async def school_report(
     for v in vendors:
         v_orders = orders_by_vendor.get(str(v.id), [])
         settled = [o for o in v_orders if _is_settled(o)]
-        rejected = len([o for o in v_orders if o.status == OrderStatus.rejected])
         vendor_perf.append({
             "vendor_id": str(v.id),
             "name": v.business_name,
             "orders": len(settled),
             "revenue_minor": sum(o.total_minor for o in settled),
             "rating": v.rating,
-            "rejection_rate": round((rejected / len(v_orders)) * 100) if v_orders else 0,
         })
     vendor_perf.sort(key=lambda x: x["revenue_minor"], reverse=True)
     top_vendor_id = vendor_perf[0]["vendor_id"] if vendor_perf and vendor_perf[0]["revenue_minor"] > 0 else None

@@ -1,15 +1,16 @@
 import time
 from collections import defaultdict
+from datetime import datetime
 from typing import Optional
-from uuid import UUID
 
-from fastapi import Depends, HTTPException, Request, status
+from fastapi import Depends, Header, HTTPException, Request, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlmodel import select
 from sqlmodel.ext.asyncio.session import AsyncSession
+from uuid import UUID
 
-from app.core.security import JWTError, decode_access_token
-from app.db.models import User
+from app.core.security import JWTError, decode_access_token, hash_token
+from app.db.models import Kiosk, KioskStatus, User
 from app.db.session import AsyncSessionLocal
 
 security = HTTPBearer()
@@ -66,6 +67,32 @@ async def get_current_user_optional(
     if not user or not user.is_active:
         return None
     return user
+
+
+async def get_current_kiosk(
+    x_kiosk_token: Optional[str] = Header(None, alias="X-Kiosk-Token"),
+    session: AsyncSession = Depends(get_session),
+) -> Kiosk:
+    """A kiosk is a device, not a person — a separate opaque-token scheme on
+    its own header, not the JWT-bearer path `get_current_user` uses. A device
+    left in a corridor is assumed compromised, so the token is looked up by
+    hash the same way a refresh token is, and every use bumps `last_seen_at`
+    so a revoked-but-still-calling device is visible.
+    """
+    if not x_kiosk_token:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Missing kiosk token")
+
+    statement = select(Kiosk).where(Kiosk.device_token_hash == hash_token(x_kiosk_token))
+    result = await session.execute(statement)
+    kiosk = result.scalar_one_or_none()
+    if not kiosk or kiosk.status != KioskStatus.active:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid or revoked kiosk token")
+
+    kiosk.last_seen_at = datetime.utcnow()
+    session.add(kiosk)
+    await session.commit()
+    await session.refresh(kiosk)
+    return kiosk
 
 
 _rate_limit_buckets: dict[str, list[float]] = defaultdict(list)

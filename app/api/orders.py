@@ -112,15 +112,6 @@ class OrderTransitionRequest(BaseModel):
 
 SERVICE_FEE_PERCENT = 5
 ESTIMATED_PREP_MINUTES = 15
-ALLOWED_TRANSITIONS = {
-    OrderStatus.pending,
-    OrderStatus.accepted,
-    OrderStatus.preparing,
-    OrderStatus.ready,
-    OrderStatus.completed,
-    OrderStatus.rejected,
-    OrderStatus.cancelled,
-}
 
 
 def compute_order_totals(items: List[MenuItem], quantities: List[int]) -> tuple[int, int, int]:
@@ -240,6 +231,22 @@ async def place_order(
     if not student:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Student profile not found for current user")
 
+    return await execute_order(student, request, idempotency_key, current_user.id, session)
+
+
+async def execute_order(
+    student: Student,
+    request: OrderPreviewRequest,
+    idempotency_key: str,
+    actor_id: Optional[UUID],
+    session: AsyncSession,
+) -> OrderCreateResponse:
+    """Shared by the pupil-authenticated path above and the kiosk-authenticated
+    one in `kiosk.py` — a kiosk order is not a different kind of order, only a
+    different way of establishing which student it is for. `actor_id` is None
+    for a kiosk order: there is no signed-in person to attribute it to, only a
+    verification token already spent by the caller.
+    """
     vendor_stmt = select(Vendor).where(Vendor.id == request.vendor_id)
     vendor_result = await session.execute(vendor_stmt)
     vendor = vendor_result.scalar_one_or_none()
@@ -340,7 +347,7 @@ async def place_order(
         subtotal_minor=subtotal,
         service_fee_minor=service_fee,
         total_minor=total,
-        status=OrderStatus.pending,
+        status=OrderStatus.paid,
         pickup_slot=request.pickup_slot,
         note=request.note,
         idempotency_key=idempotency_key,
@@ -383,15 +390,15 @@ async def place_order(
         description=f"Purchase order {order.code}",
         reference=str(order.id),
         order_id=order.id,
-        actor_id=current_user.id,
+        actor_id=actor_id,
         created_at=datetime.utcnow(),
     )
     session.add(transaction)
     order_event = OrderEvent(
         id=uuid4(),
         order_id=order.id,
-        status=OrderStatus.pending,
-        actor_id=current_user.id,
+        status=OrderStatus.paid,
+        actor_id=actor_id,
         note="Order placed",
         created_at=datetime.utcnow(),
     )
@@ -498,7 +505,12 @@ async def transition_order(
     current_user: User = Depends(get_current_user),
     session: AsyncSession = Depends(get_session),
 ):
-    if request.new_status not in ALLOWED_TRANSITIONS:
+    """The only decision left in this model: a vendor either confirms a paid
+    order or cancels it. There is nowhere to go from `confirmed`/`cancelled`
+    (both terminal), no student-initiated cancel, and nobody but the vendor
+    who owns the order gets to make the call.
+    """
+    if request.new_status not in (OrderStatus.confirmed, OrderStatus.cancelled):
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid target status")
 
     order_stmt = select(Order).where(Order.id == order_id)
@@ -507,58 +519,40 @@ async def transition_order(
     if not order:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Order not found")
 
-    TRANSITION_MATRIX = {
-        OrderStatus.pending: {OrderStatus.accepted, OrderStatus.rejected, OrderStatus.cancelled},
-        OrderStatus.accepted: {OrderStatus.preparing, OrderStatus.cancelled},
-        OrderStatus.preparing: {OrderStatus.ready},
-        OrderStatus.ready: {OrderStatus.completed},
-    }
-
-    if order.status not in TRANSITION_MATRIX:
+    if order.status != OrderStatus.paid:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Order may not be transitioned from its current status")
 
-    if current_user.role == "vendor":
-        vendor_stmt = select(Vendor).where(Vendor.user_id == current_user.id)
-        vendor_result = await session.execute(vendor_stmt)
-        vendor = vendor_result.scalar_one_or_none()
-        if not vendor or vendor.id != order.vendor_id:
-            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not authorized for this order")
-        if request.new_status not in TRANSITION_MATRIX[order.status]:
-            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Invalid transition")
-    elif current_user.role == "student":
-        student_stmt = select(Student).where(Student.user_id == current_user.id)
-        student_result = await session.execute(student_stmt)
-        student = student_result.scalar_one_or_none()
-        if not student or student.id != order.student_id:
-            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not authorized for this order")
-        if request.new_status != OrderStatus.cancelled:
-            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Students may only cancel their own orders")
-        if request.new_status not in TRANSITION_MATRIX[order.status]:
-            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Invalid transition")
-    else:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Only vendors or students may transition orders")
+    if current_user.role != "vendor":
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Only the vendor may confirm or cancel an order")
+    vendor_stmt = select(Vendor).where(Vendor.user_id == current_user.id)
+    vendor_result = await session.execute(vendor_stmt)
+    vendor = vendor_result.scalar_one_or_none()
+    if not vendor or vendor.id != order.vendor_id:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not authorized for this order")
 
-    if request.new_status in {OrderStatus.rejected, OrderStatus.cancelled}:
+    if request.new_status == OrderStatus.cancelled:
         wallet_stmt = select(Wallet).where(Wallet.student_id == order.student_id)
         wallet_result = await session.execute(wallet_stmt)
         wallet = wallet_result.scalar_one_or_none()
         if wallet:
             wallet.balance_minor += order.total_minor
+            wallet.updated_at = datetime.utcnow()
             session.add(wallet)
-            transaction = WalletTransaction(
-                id=uuid4(),
-                wallet_id=wallet.id,
-                student_id=wallet.student_id,
-                type="refund",
-                amount_minor=order.total_minor,
-                balance_after_minor=wallet.balance_minor,
-                description=f"Refund for order {order.code}",
-                reference=str(order.id),
-                order_id=order.id,
-                actor_id=current_user.id,
-                created_at=datetime.utcnow(),
+            session.add(
+                WalletTransaction(
+                    id=uuid4(),
+                    wallet_id=wallet.id,
+                    student_id=wallet.student_id,
+                    type="refund",
+                    amount_minor=order.total_minor,
+                    balance_after_minor=wallet.balance_minor,
+                    description=f"Refund for order {order.code}",
+                    reference=str(order.id),
+                    order_id=order.id,
+                    actor_id=current_user.id,
+                    created_at=datetime.utcnow(),
+                )
             )
-            session.add(transaction)
 
     order.status = request.new_status
     order.updated_at = datetime.utcnow()

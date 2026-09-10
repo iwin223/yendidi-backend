@@ -111,6 +111,20 @@ async def _authorize_school_admin(school_id: UUID, current_user: User) -> None:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not authorized for this school")
 
 
+@router.get("/schools", response_model=List[SchoolResponse])
+async def list_schools(
+    current_user: User = Depends(get_current_user),
+    session: AsyncSession = Depends(get_session),
+):
+    # No single-school scope to fall back to here, unlike `get_school` — a
+    # school admin has exactly one school and reads it by id; this route only
+    # makes sense for a role that oversees more than one.
+    if current_user.role != Role.super_admin:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Only platform admins may list schools")
+    result = await session.execute(select(School).order_by(School.name))
+    return result.scalars().all()
+
+
 @router.get("/schools/{school_id}", response_model=SchoolResponse)
 async def get_school(
     school_id: UUID,
@@ -245,23 +259,13 @@ async def create_school_student(
     existing_student = await session.execute(select(Student).where(Student.student_code == request.student_code))
     if existing_student.scalar_one_or_none():
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Student code already exists")
-    user = User(
-        id=uuid4(),
-        role=Role.student,
-        full_name=f"{request.first_name} {request.last_name}",
-        email=request.email,
-        phone=request.phone,
-        password_hash=None,
-        school_id=school_id,
-        is_active=True,
-        created_at=datetime.utcnow(),
-        updated_at=datetime.utcnow(),
-    )
-    session.add(user)
-    await session.flush()  # `student.user_id` FKs to this row — must exist before the student insert
+    # A pupil is a students row and a wallets row, never a login — the kiosk
+    # pivot (SPEC_KIOSK_AND_VERIFICATION.md §2) means nobody signs in as a
+    # pupil any more, so minting a `users` row here was creating a live,
+    # unused authentication surface for every single enrolment.
     student = Student(
         id=uuid4(),
-        user_id=user.id,
+        user_id=None,
         school_id=school_id,
         student_code=request.student_code,
         first_name=request.first_name,
@@ -318,23 +322,9 @@ async def import_school_students(
             skipped += 1
             errors.append(f"row {index}: student_code {student_code} already exists")
             continue
-        user = User(
-            id=uuid4(),
-            role=Role.student,
-            full_name=f"{first_name} {last_name}",
-            email=None,
-            phone=None,
-            password_hash=None,
-            school_id=school_id,
-            is_active=True,
-            created_at=datetime.utcnow(),
-            updated_at=datetime.utcnow(),
-        )
-        session.add(user)
-        await session.flush()  # `student.user_id` FKs to this row — must exist before the student insert
         student = Student(
             id=uuid4(),
-            user_id=user.id,
+            user_id=None,
             school_id=school_id,
             student_code=student_code,
             first_name=first_name,

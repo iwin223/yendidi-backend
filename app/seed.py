@@ -47,9 +47,38 @@ from app.db.session import AsyncSessionLocal
 
 PASSWORD = "Password123!"
 
+SUPER_ADMIN_EMAIL = "super_admin@y3ndidi.example"
+
+
+async def _ensure_super_admin(session) -> None:
+    """A platform admin, not scoped to any school — the role `POST /kiosks`
+    and the rest of platform administration need, and the only seeded
+    account with it. Kept separate from the rest of `seed()`: that function
+    bails out entirely once the demo school exists, but this has no
+    dependency on the school and should still be creatable (or already
+    present) on every run.
+    """
+    result = await session.execute(select(User).where(User.email == SUPER_ADMIN_EMAIL))
+    if result.scalar_one_or_none():
+        return
+    session.add(
+        User(
+            id=uuid4(),
+            role=Role.super_admin,
+            full_name="Platform Admin",
+            email=SUPER_ADMIN_EMAIL,
+            phone=None,
+            password_hash=get_password_hash(PASSWORD),
+        )
+    )
+    await session.commit()
+    print(f"Created super_admin: {SUPER_ADMIN_EMAIL} (password: {PASSWORD})")
+
 
 async def seed() -> None:
     async with AsyncSessionLocal() as session:
+        await _ensure_super_admin(session)
+
         result = await session.execute(select(School).where(School.code == "Y3N-001"))
         school = result.scalars().first()
         if school:
@@ -242,7 +271,7 @@ async def seed() -> None:
             subtotal_minor=6500,
             service_fee_minor=325,
             total_minor=6825,
-            status=OrderStatus.ready,
+            status=OrderStatus.confirmed,
             pickup_slot="12:30-13:00",
             note="Please keep the meal mild.",
             idempotency_key="seed-order-0001",
@@ -252,8 +281,8 @@ async def seed() -> None:
         session.add_all([
             OrderLine(id=uuid4(), order_id=order.id, menu_item_id=rice.id, name=rice.name, art_key=rice.art_key, unit_price_minor=rice.price_minor, quantity=1),
             OrderLine(id=uuid4(), order_id=order.id, menu_item_id=drink.id, name=drink.name, art_key=drink.art_key, unit_price_minor=drink.price_minor, quantity=2),
-            OrderEvent(id=uuid4(), order_id=order.id, status=OrderStatus.pending, actor_id=parent_user.id, note="Order placed"),
-            OrderEvent(id=uuid4(), order_id=order.id, status=OrderStatus.ready, actor_id=vendor_user.id, note="Ready for pickup"),
+            OrderEvent(id=uuid4(), order_id=order.id, status=OrderStatus.paid, actor_id=parent_user.id, note="Order placed"),
+            OrderEvent(id=uuid4(), order_id=order.id, status=OrderStatus.confirmed, actor_id=vendor_user.id, note="Confirmed by vendor"),
             WalletTransaction(
                 id=uuid4(),
                 wallet_id=wallet.id,
@@ -326,6 +355,7 @@ async def seed() -> None:
         await session.commit()
         print("Seeded Y3ndidi development data.")
         print(f"Login password for all demo users: {PASSWORD}")
+        print(f"Platform admin: {SUPER_ADMIN_EMAIL} (password: {PASSWORD})")
 
 
 if __name__ == "__main__":
