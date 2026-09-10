@@ -6,14 +6,17 @@ from fastapi import APIRouter, Depends, HTTPException, Header, status
 from pydantic import BaseModel
 from sqlmodel import select
 
+from app.core.analytics import format_money
 from app.core.dependencies import get_current_user, get_session
 from app.db.models import (
+    AuditLog,
     Guardianship,
     Parent,
     Role,
     Student,
     Topup,
     TopupStatus,
+    TransactionType,
     User,
     Wallet,
     WalletTransaction,
@@ -22,6 +25,12 @@ from app.db.session import AsyncSession
 from app.payments import PaystackError, create_paystack_transaction
 
 router = APIRouter()
+
+# GH₵1–200. There is no processor behind this credit — money reaches a school
+# drawer, not Paystack — so the realistic error is a typed extra zero, not a
+# large legitimate top-up. See docs/BACKEND_HANDOVER.md §8a.
+MIN_CASH_TOPUP_MINOR = 100
+MAX_CASH_TOPUP_MINOR = 20_000
 
 
 class WalletTopupRequest(BaseModel):
@@ -98,6 +107,17 @@ class WalletControlUpdate(BaseModel):
 
 class WalletFreezeRequest(BaseModel):
     frozen: bool
+
+
+class CashTopUpRequest(BaseModel):
+    amount_minor: int
+    note: Optional[str] = None
+
+
+class CashTopUpResponse(BaseModel):
+    transaction_id: UUID
+    balance_minor: int
+    recorded_at: datetime
 
 
 async def ensure_wallet_access(wallet: Wallet, current_user: User, session: AsyncSession) -> None:
@@ -214,6 +234,89 @@ async def create_topup(
         message="Payment initiated",
         paystack_url=topup.authorization_url,
     )
+
+
+@router.post("/wallets/{wallet_id}/cash-topups", response_model=CashTopUpResponse)
+async def record_cash_topup(
+    wallet_id: UUID,
+    request: CashTopUpRequest,
+    current_user: User = Depends(get_current_user),
+    session: AsyncSession = Depends(get_session),
+):
+    """Cash taken at the school office (docs/BACKEND_HANDOVER.md §8a).
+
+    Unlike every other credit, there is no payment processor behind this one
+    — money reaches a drawer, not Paystack — so the client is not the
+    security boundary and every rule it already enforces gets enforced again
+    here: attribution from the bearer token (never a client-supplied actor
+    id), the GH₵1–200 band rejected rather than clamped, and a frozen wallet
+    refused outright.
+    """
+    if current_user.role not in (Role.school_admin, Role.super_admin):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Only a school administrator may record a cash top-up")
+
+    wallet_stmt = select(Wallet).where(Wallet.id == wallet_id)
+    wallet_result = await session.execute(wallet_stmt)
+    wallet = wallet_result.scalar_one_or_none()
+    if not wallet:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Wallet not found")
+
+    if current_user.role == Role.school_admin:
+        student_stmt = select(Student).where(Student.id == wallet.student_id)
+        student_result = await session.execute(student_stmt)
+        student = student_result.scalar_one_or_none()
+        if not student or student.school_id != current_user.school_id:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not authorized to credit this wallet")
+
+    if request.amount_minor < MIN_CASH_TOPUP_MINOR:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"The smallest cash top-up is {format_money(MIN_CASH_TOPUP_MINOR)}.")
+    if request.amount_minor > MAX_CASH_TOPUP_MINOR:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"The most that can be taken at once is {format_money(MAX_CASH_TOPUP_MINOR)}. Record a larger sum as separate top-ups.",
+        )
+    if wallet.frozen:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="This wallet is frozen. A guardian must unfreeze it before it can take money.")
+
+    note = request.note.strip() if request.note and request.note.strip() else None
+    new_balance = wallet.balance_minor + request.amount_minor
+    wallet.balance_minor = new_balance
+    wallet.updated_at = datetime.utcnow()
+    session.add(wallet)
+
+    transaction = WalletTransaction(
+        id=uuid4(),
+        wallet_id=wallet.id,
+        student_id=wallet.student_id,
+        type=TransactionType.topup,
+        amount_minor=request.amount_minor,
+        balance_after_minor=new_balance,
+        description=f"Cash at the school office · {note}" if note else "Cash at the school office",
+        method="cash",
+        # Not a payment reference — there is no processor to reference. The
+        # actor recorded below is what makes this credit investigable.
+        reference=f"CASH-{uuid4().hex[:8].upper()}",
+        actor_id=current_user.id,
+        created_at=datetime.utcnow(),
+    )
+    session.add(transaction)
+
+    session.add(
+        AuditLog(
+            id=uuid4(),
+            actor_id=current_user.id,
+            actor_name=current_user.full_name,
+            action="wallet.cash_topup",
+            entity_type="wallet",
+            entity_id=wallet.id,
+            summary=f"Took {format_money(request.amount_minor)} cash" + (f" ({note})" if note else ""),
+        )
+    )
+
+    await session.commit()
+    await session.refresh(transaction)
+
+    return CashTopUpResponse(transaction_id=transaction.id, balance_minor=new_balance, recorded_at=transaction.created_at)
 
 
 @router.get("/students/{student_id}/wallet", response_model=WalletResponse)
