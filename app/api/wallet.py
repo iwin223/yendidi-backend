@@ -396,8 +396,16 @@ async def get_wallet_transactions(
 # processing — Paystack uses several depending on the channel) means "still
 # nothing to report," so the topup is left exactly as it was rather than
 # guessed at.
+#
+# "abandoned" belongs in that still-nothing-to-report bucket, not failure:
+# per Paystack's own docs it means "the customer has not completed the
+# transaction" — the default verify answer before the payer has done
+# anything at all, not a statement that they never will. Treating it as
+# terminal failed every poll that landed before the payer finished the
+# in-app checkout, which — polling active while that checkout is still
+# open — is most of them.
 _PAYSTACK_SUCCESS_STATUSES = {"success"}
-_PAYSTACK_FAILURE_STATUSES = {"failed", "abandoned", "reversed"}
+_PAYSTACK_FAILURE_STATUSES = {"failed", "reversed"}
 
 
 @router.get("/topups/{topup_id}", response_model=TopupStatusResponse)

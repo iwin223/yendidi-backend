@@ -134,13 +134,13 @@ def test_polling_a_failed_topup_marks_it_failed_without_crediting(client, seeded
 
     as_user(seeded["parent_user"])
     with patch("app.api.wallet.verify_paystack_transaction", new_callable=AsyncMock) as mock_verify:
-        mock_verify.return_value = {"status": "abandoned", "gateway_response": "Timed out"}
+        mock_verify.return_value = {"status": "failed", "gateway_response": "Insufficient funds"}
         resp = client.get(f"/v1/topups/{topup_id}")
 
     assert resp.status_code == 200, resp.text
     body = resp.json()
     assert body["status"] == "failed"
-    assert body["failure_reason"] == "Timed out"
+    assert body["failure_reason"] == "Insufficient funds"
     assert _wallet_balance(seeded["wallet_id"]) == balance_before
 
 
@@ -155,6 +155,25 @@ def test_polling_leaves_a_topup_pending_when_paystack_has_no_answer_yet(client, 
 
     # A verify failure (Paystack unreachable, or a race between initialize and
     # verify) is not this request's problem — the client just polls again.
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["status"] == "pending"
+    assert _wallet_balance(seeded["wallet_id"]) == balance_before
+
+
+def test_polling_an_abandoned_checkout_leaves_it_pending_without_crediting(client, seeded):
+    # "abandoned" is Paystack's default verify answer before the payer has
+    # done anything — the state almost every poll sees while the in-app
+    # checkout is still open, not a statement that they gave up. Treating it
+    # as terminal failed the topup out from under a payer who was still
+    # looking at the card form.
+    topup_id = run(_create_pending_topup(seeded, amount_minor=1_200))
+    balance_before = _wallet_balance(seeded["wallet_id"])
+
+    as_user(seeded["parent_user"])
+    with patch("app.api.wallet.verify_paystack_transaction", new_callable=AsyncMock) as mock_verify:
+        mock_verify.return_value = {"status": "abandoned"}
+        resp = client.get(f"/v1/topups/{topup_id}")
+
     assert resp.status_code == 200, resp.text
     assert resp.json()["status"] == "pending"
     assert _wallet_balance(seeded["wallet_id"]) == balance_before
