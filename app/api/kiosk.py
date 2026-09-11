@@ -15,7 +15,7 @@ from app.core.dependencies import (
     rate_limiter,
 )
 from app.core.security import hash_token
-from app.db.models import FoodCategory, Kiosk, KioskStatus, KioskVerification, Role, School, Student, User, Wallet
+from app.db.models import FaceTemplate, FoodCategory, Kiosk, KioskStatus, KioskVerification, Role, School, Student, User, Wallet
 from app.db.session import AsyncSession
 
 router = APIRouter()
@@ -279,27 +279,13 @@ class KioskVerifyResponse(BaseModel):
     wallet_frozen: bool
 
 
-@router.post("/kiosks/verify", response_model=KioskVerifyResponse)
-async def verify_student(
-    request: KioskVerifyRequest,
-    kiosk: Kiosk = Depends(get_current_kiosk),
-    session: AsyncSession = Depends(get_session),
-    _rl=Depends(VERIFY_RATE_LIMIT),
-):
-    """Turns an anonymous kiosk cart into a named payer (SPEC_KIOSK_AND_VERIFICATION.md §3).
-
-    An unknown code and a code belonging to another school must be
-    indistinguishable, or whoever is standing at the kiosk can use it to probe
-    which codes exist — both fall through to the same 404 below. Returns only
-    what completing this one purchase requires; nothing here should let the
-    token double as a general pupil record.
+async def _build_verify_response(student: Student, kiosk: Kiosk, session: AsyncSession) -> KioskVerifyResponse:
+    """The common tail of both verify paths — code and face — once a
+    specific student has been identified: mint the one-shot token, spend
+    nothing yet, and return exactly what completing this one purchase
+    requires. Nothing here should let the token double as a general pupil
+    record.
     """
-    statement = select(Student).where(Student.student_code == request.student_code.strip())
-    result = await session.execute(statement)
-    student = result.scalar_one_or_none()
-    if not student or student.school_id != kiosk.school_id:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="No match found")
-
     wallet_stmt = select(Wallet).where(Wallet.student_id == student.id)
     wallet_result = await session.execute(wallet_stmt)
     wallet = wallet_result.scalar_one_or_none()
@@ -335,6 +321,98 @@ async def verify_student(
         blocked_categories=wallet.blocked_categories,
         wallet_frozen=wallet.frozen,
     )
+
+
+@router.post("/kiosks/verify", response_model=KioskVerifyResponse)
+async def verify_student(
+    request: KioskVerifyRequest,
+    kiosk: Kiosk = Depends(get_current_kiosk),
+    session: AsyncSession = Depends(get_session),
+    _rl=Depends(VERIFY_RATE_LIMIT),
+):
+    """Turns an anonymous kiosk cart into a named payer (SPEC_KIOSK_AND_VERIFICATION.md §3).
+
+    An unknown code and a code belonging to another school must be
+    indistinguishable, or whoever is standing at the kiosk can use it to probe
+    which codes exist — both fall through to the same 404 below.
+    """
+    statement = select(Student).where(Student.student_code == request.student_code.strip())
+    result = await session.execute(statement)
+    student = result.scalar_one_or_none()
+    if not student or student.school_id != kiosk.school_id:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="No match found")
+
+    return await _build_verify_response(student, kiosk, session)
+
+
+# Cosine similarity a live capture must clear against an enrolled template to
+# count as a match. Deliberately conservative pending real calibration data —
+# there is no live face traffic yet to tune this against, and the cost of
+# being too strict (a pupil falls back to their card, which is always a
+# first-class path — see verification.ts on the client) is far lower than
+# the cost of being too loose (someone else's face authorises a purchase).
+FACE_MATCH_THRESHOLD = 0.55
+
+
+def _cosine_similarity(a: List[float], b: List[float]) -> float:
+    dot = sum(x * y for x, y in zip(a, b))
+    norm_a = sum(x * x for x in a) ** 0.5
+    norm_b = sum(y * y for y in b) ** 0.5
+    if norm_a == 0 or norm_b == 0:
+        return 0.0
+    return dot / (norm_a * norm_b)
+
+
+class KioskVerifyFaceRequest(BaseModel):
+    # A live capture's embedding, computed on the kiosk device — never a
+    # photo, and this endpoint has nowhere to store one if it were sent.
+    embedding: List[float]
+    model_version: str
+
+
+@router.post("/kiosks/verify-face", response_model=KioskVerifyResponse)
+async def verify_student_by_face(
+    request: KioskVerifyFaceRequest,
+    kiosk: Kiosk = Depends(get_current_kiosk),
+    session: AsyncSession = Depends(get_session),
+    _rl=Depends(VERIFY_RATE_LIMIT),
+):
+    """Face is the primary, code-free path (SPEC_KIOSK_AND_VERIFICATION.md §4):
+    a pupil looks at the camera and is identified, rather than typing
+    anything first — so this searches every pupil enrolled at this kiosk's
+    school, not one already-named candidate.
+
+    The match itself happens here, never on the device. A kiosk is an
+    unattended device in a corridor — the same assumption the `Kiosk` model
+    itself is built on — and a kiosk trusted to decide "yes, this matches"
+    on its own can be modified to say yes to everyone. This is the one place
+    that decision is made, the same way a wallet balance or a spend limit is
+    never something a kiosk is trusted to report about itself.
+
+    No match reaches the same generic refusal an unknown student code does
+    (SPEC §3) — a device in a corridor should not be able to tell "no pupil
+    looks like this" apart from "that code doesn't exist."
+    """
+    templates_stmt = (
+        select(FaceTemplate, Student)
+        .join(Student, FaceTemplate.student_id == Student.id)
+        .where(Student.school_id == kiosk.school_id, FaceTemplate.model_version == request.model_version)
+    )
+    templates_result = await session.execute(templates_stmt)
+    candidates = templates_result.all()
+
+    best_student: Optional[Student] = None
+    best_score = FACE_MATCH_THRESHOLD
+    for template, student in candidates:
+        score = _cosine_similarity(request.embedding, template.embedding)
+        if score >= best_score:
+            best_score = score
+            best_student = student
+
+    if not best_student:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="No match found")
+
+    return await _build_verify_response(best_student, kiosk, session)
 
 
 @router.post("/kiosks/orders", response_model=OrderCreateResponse)

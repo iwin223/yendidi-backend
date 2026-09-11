@@ -11,6 +11,8 @@ from sqlmodel import select
 from app.core.dependencies import get_current_user, get_session
 from app.db.models import (
     Announcement,
+    AuditLog,
+    FaceTemplate,
     Guardianship,
     School,
     SchoolStatus,
@@ -102,6 +104,52 @@ class SchoolEnrollmentResult(BaseModel):
     imported: int
     skipped: int
     errors: List[str]
+
+
+# Expected embedding length per supported model version, so a mismatched or
+# garbage vector is rejected at enrollment rather than silently stored and
+# discovered broken the first time a kiosk tries to compare against it. A
+# kiosk trusts `model_version` to mean "these numbers are comparable this
+# way" — enrollment is the one place that guarantee has to be enforced.
+SUPPORTED_FACE_MODELS = {
+    "arcface-r100-v1": 512,
+}
+
+
+class FaceEnrollmentRequest(BaseModel):
+    # The embedding a trusted device computed from a live capture — never a
+    # photo. Nothing on this request accepts or stores an image; there is no
+    # raw face data in this system to leak, retain past its purpose, or
+    # count as a child's "image" under COPPA's training-data prohibition.
+    embedding: List[float]
+    model_version: str
+
+
+class FaceEnrollmentResponse(BaseModel):
+    student_id: UUID
+    model_version: str
+    enrolled_at: datetime
+
+
+class FaceEnrollmentStatusResponse(BaseModel):
+    student_id: UUID
+    enrolled: bool
+    model_version: Optional[str] = None
+    enrolled_at: Optional[datetime] = None
+
+
+async def _write_audit_log(session: AsyncSession, actor: User, action: str, entity_id: UUID, summary: str) -> None:
+    session.add(
+        AuditLog(
+            id=uuid4(),
+            actor_id=actor.id,
+            actor_name=actor.full_name,
+            action=action,
+            entity_type="student",
+            entity_id=entity_id,
+            summary=summary,
+        )
+    )
 
 
 async def _authorize_school_admin(school_id: UUID, current_user: User) -> None:
@@ -371,3 +419,134 @@ async def update_student(
     await session.commit()
     await session.refresh(student)
     return student
+
+
+async def _get_student_or_404(student_id: UUID, session: AsyncSession) -> Student:
+    statement = select(Student).where(Student.id == student_id)
+    result = await session.execute(statement)
+    student = result.scalar_one_or_none()
+    if not student:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Student not found")
+    return student
+
+
+@router.put("/students/{student_id}/face-enrollment", response_model=FaceEnrollmentResponse)
+async def enroll_student_face(
+    student_id: UUID,
+    request: FaceEnrollmentRequest,
+    current_user: User = Depends(get_current_user),
+    session: AsyncSession = Depends(get_session),
+):
+    """Stores the one face embedding a kiosk compares a live capture against
+    for this pupil. `PUT`, not `POST`: enrollment is idempotent by student —
+    a re-capture (bad lighting, a model upgrade) replaces whatever was there
+    rather than accumulating templates a kiosk could still be handed.
+
+    The embedding must already be computed by the caller (a trusted
+    school-admin device) before this request — nothing here accepts a photo,
+    processes one, or has anywhere to store one.
+    """
+    student = await _get_student_or_404(student_id, session)
+    await _authorize_school_admin(student.school_id, current_user)
+
+    expected_dim = SUPPORTED_FACE_MODELS.get(request.model_version)
+    if expected_dim is None:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Unsupported model_version. Expected one of: {', '.join(SUPPORTED_FACE_MODELS)}",
+        )
+    if len(request.embedding) != expected_dim:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"{request.model_version} embeddings must have {expected_dim} values, got {len(request.embedding)}",
+        )
+
+    existing_stmt = select(FaceTemplate).where(FaceTemplate.student_id == student_id)
+    existing_result = await session.execute(existing_stmt)
+    template = existing_result.scalar_one_or_none()
+    is_replacement = template is not None
+
+    if template:
+        template.embedding = request.embedding
+        template.model_version = request.model_version
+        template.enrolled_by = current_user.id
+        template.enrolled_at = datetime.utcnow()
+    else:
+        template = FaceTemplate(
+            id=uuid4(),
+            student_id=student_id,
+            embedding=request.embedding,
+            model_version=request.model_version,
+            enrolled_by=current_user.id,
+            enrolled_at=datetime.utcnow(),
+        )
+    session.add(template)
+    await _write_audit_log(
+        session,
+        current_user,
+        "student.face_enrollment.replaced" if is_replacement else "student.face_enrollment.created",
+        student_id,
+        f"Face enrollment {'replaced' if is_replacement else 'created'} for {student.first_name} {student.last_name} ({request.model_version})",
+    )
+    await session.commit()
+    await session.refresh(template)
+    return FaceEnrollmentResponse(student_id=student_id, model_version=template.model_version, enrolled_at=template.enrolled_at)
+
+
+@router.get("/students/{student_id}/face-enrollment", response_model=FaceEnrollmentStatusResponse)
+async def get_student_face_enrollment_status(
+    student_id: UUID,
+    current_user: User = Depends(get_current_user),
+    session: AsyncSession = Depends(get_session),
+):
+    """Whether a pupil has an enrolled face template, for a school admin's
+    own roster view. Deliberately never returns the embedding itself —
+    nothing outside `POST /kiosks/verify`, which hands it to exactly the one
+    kiosk mid-transaction for exactly the one matched student, should ever
+    see it.
+    """
+    student = await _get_student_or_404(student_id, session)
+    await _authorize_school_admin(student.school_id, current_user)
+
+    template_stmt = select(FaceTemplate).where(FaceTemplate.student_id == student_id)
+    template_result = await session.execute(template_stmt)
+    template = template_result.scalar_one_or_none()
+    if not template:
+        return FaceEnrollmentStatusResponse(student_id=student_id, enrolled=False)
+    return FaceEnrollmentStatusResponse(
+        student_id=student_id, enrolled=True, model_version=template.model_version, enrolled_at=template.enrolled_at
+    )
+
+
+@router.delete("/students/{student_id}/face-enrollment", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_student_face_enrollment(
+    student_id: UUID,
+    current_user: User = Depends(get_current_user),
+    session: AsyncSession = Depends(get_session),
+):
+    """Removes a pupil's enrolled face template — the lever behind a parent
+    asking for their child's biometric data to be deleted, which COPPA and
+    Ghana's own Data Protection Act both treat as a right, not a courtesy.
+    Kiosk face-matching for this pupil silently stops (the verify response
+    just omits the embedding field); the code/PIN path is unaffected, since
+    it was never able to depend on face enrollment existing in the first
+    place.
+    """
+    student = await _get_student_or_404(student_id, session)
+    await _authorize_school_admin(student.school_id, current_user)
+
+    template_stmt = select(FaceTemplate).where(FaceTemplate.student_id == student_id)
+    template_result = await session.execute(template_stmt)
+    template = template_result.scalar_one_or_none()
+    if not template:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="No face enrollment on file")
+
+    await session.delete(template)
+    await _write_audit_log(
+        session,
+        current_user,
+        "student.face_enrollment.deleted",
+        student_id,
+        f"Face enrollment deleted for {student.first_name} {student.last_name}",
+    )
+    await session.commit()

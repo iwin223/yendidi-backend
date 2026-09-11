@@ -155,6 +155,34 @@ class Student(SQLModel, table=True):
     created_at: datetime = Field(default_factory=datetime.utcnow)
 
 
+class FaceTemplate(SQLModel, table=True):
+    """The one enrolled face embedding for a pupil, used to confirm identity
+    at a kiosk — a 1:1 check against the single candidate `student_code`
+    already names, never a search across the school's faces.
+
+    Holds only the embedding vector a trusted device computed at enrollment
+    time, never the source photo: a raw face image is not persisted anywhere
+    in this system. That single choice is what keeps a breach of this table
+    low-stakes (an embedding is not a viewable face) and what keeps
+    enrollment clear of COPPA's prohibition on retaining children's images
+    for anything resembling model training — there is no image to retain.
+
+    `student_id` is unique: re-enrollment (a bad capture, a model upgrade)
+    replaces the row rather than accumulating old templates a kiosk could
+    still be handed.
+    """
+
+    id: Optional[UUID] = Field(default=None, primary_key=True)
+    student_id: UUID = Field(foreign_key="student.id", unique=True)
+    embedding: List[float] = Field(sa_column=Column(JSON, nullable=False))
+    # Names the model the embedding was computed with (e.g. "arcface-r100-v1")
+    # rather than assuming one forever — two embeddings from different models
+    # are not comparable, so a kiosk has to know before it trusts a match.
+    model_version: str
+    enrolled_by: UUID = Field(foreign_key="user.id")
+    enrolled_at: datetime = Field(default_factory=datetime.utcnow)
+
+
 class Parent(SQLModel, table=True):
     id: Optional[UUID] = Field(default=None, primary_key=True)
     user_id: UUID = Field(foreign_key="user.id", unique=True)
